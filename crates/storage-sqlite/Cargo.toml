@@ -1,0 +1,15 @@
+[package]
+name = "orka-storage-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+sqlx.workspace = true
+orka-core = { path = "../core" }
+
+[dev-dependencies]
+tokio.workspace = true

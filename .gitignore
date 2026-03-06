@@ -1,0 +1,22 @@
+# Build
+/target
+
+# Environment / secrets
+.env
+.env.local
+.env.*
+!.env.example
+
+# Runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# IDE / OS
+.DS_Store
+.claude/
+.idea/
+.vscode/
+*.swp
+*.swo
