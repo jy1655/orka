@@ -40,12 +40,7 @@ impl SqliteStore {
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        let migrator = sqlx::migrate::Migrator::new(std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../migrations"
-        )))
-        .await?;
-        migrator.run(&self.pool).await?;
+        sqlx::migrate!("../../migrations").run(&self.pool).await?;
         Ok(())
     }
 }

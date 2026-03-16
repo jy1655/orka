@@ -634,7 +634,13 @@ cli-rs-gateway-DT/
 │   ├── adapters-discord/      # Discord Gateway + REST API
 │   ├── adapters-telegram/     # Telegram Long Polling + REST API
 │   └── storage-sqlite/        # SQLite 기반 EventStore 구현
-├── migrations/                # SQLite 마이그레이션 SQL
+├── migrations/                # SQLite 마이그레이션 SQL (바이너리에 임베드됨)
+├── scripts/
+│   └── windows/               # Windows 배포 스크립트
+│       ├── setup.ps1          # 전제조건 자동 설치 (VC++ Runtime, pwsh7, Node.js, Codex)
+│       ├── start-orka.ps1     # .env 로드 + 실행
+│       ├── register-startup.ps1 # 시작프로그램 등록/해제
+│       └── install-service.ps1 # NSSM 서비스 등록
 ├── docs/                      # 설계 문서
 ├── .env.example               # 환경변수 템플릿
 └── Cargo.toml                 # Workspace 설정
@@ -648,6 +654,27 @@ cli-rs-gateway-DT/
 
 ---
 
+## Windows 배포
+
+Windows PC(미니 PC 등)에서 상시 실행할 수 있습니다. macOS에서 크로스 컴파일 후 바이너리만 전송하는 방식을 권장합니다.
+
+```bash
+# macOS에서 크로스 컴파일
+brew install mingw-w64 && rustup target add x86_64-pc-windows-gnu
+cargo build --release -p orka-app --target x86_64-pc-windows-gnu
+
+# Windows PC로 전송
+scp target/x86_64-pc-windows-gnu/release/orka-app.exe user@windows-pc:"C:/Users/you/orka/"
+```
+
+Windows PC에 필요한 것:
+- **Visual C++ Redistributable** (Codex CLI에 필요)
+- **Node.js** + `npm install -g @openai/codex` (AI CLI)
+
+상세 가이드: [`docs/WINDOWS_DEPLOYMENT.md`](docs/WINDOWS_DEPLOYMENT.md)
+
+---
+
 ## 추가 문서
 
 상세한 기술 문서는 `docs/` 디렉토리에 있습니다:
@@ -658,6 +685,7 @@ cli-rs-gateway-DT/
 | `TECHNICAL_PLAN.md` | 기술 구현 계획 |
 | `RUNBOOK.md` | 운영 매뉴얼 |
 | `DEPLOYMENT_CHECKLIST.md` | 배포 체크리스트 |
+| `WINDOWS_DEPLOYMENT.md` | Windows 배포 가이드 |
 | `DISCORD_MULTI_CLI_SPEC.md` | Discord 멀티 CLI 스펙 |
 | `FAILURE_EDGECASE_PLAN.md` | 장애/엣지케이스 대응 |
 | `CODE_REVIEW_REPORT.md` | 코드 리뷰 리포트 |
