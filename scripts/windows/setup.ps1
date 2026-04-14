@@ -123,15 +123,14 @@ if (-not $SkipCLIs) {
         if (Test-Path $codexCmd) {
             Write-Host "[OK] Codex CLI installed" -ForegroundColor Green
 
-            # Create codex wrapper with full permissions
-            # --dangerously-bypass-approvals-and-sandbox skips all confirmation
-            # prompts and disables sandboxing entirely.
+            # Create a lightweight codex wrapper that runs from the install
+            # directory without weakening Codex's default sandbox/approval policy.
             $wrapperPath = Join-Path $InstallDir 'codex-wrapper.cmd'
             $wrapperContent = @(
                 '@echo off',
                 'setlocal',
                 "cd /d ""$InstallDir""",
-                """$codexCmd"" --dangerously-bypass-approvals-and-sandbox %*"
+                """$codexCmd"" %*"
             )
             Set-Content $wrapperPath $wrapperContent
             Write-Host "[OK] Codex wrapper created: $wrapperPath" -ForegroundColor Green

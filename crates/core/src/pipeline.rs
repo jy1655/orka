@@ -7,8 +7,9 @@ use anyhow::Result;
 use tracing::{debug, info, warn};
 
 use crate::model::{
-    normalize_scope_key, normalize_session_id, Command, InboundEvent, OutboundAction, ProviderKind,
-    ProviderStatus, RuntimeInvokeRequest, RuntimeLogContext, RuntimeMode, RuntimePreference,
+    normalize_scope_key, normalize_session_id, render_help_text, Command, InboundEvent,
+    OutboundAction, ProviderKind, ProviderStatus, RuntimeInvokeRequest, RuntimeLogContext,
+    RuntimeMode, RuntimePreference,
 };
 use crate::policy::AccessPolicy;
 use crate::ports::{AgentRuntime, EventStore, OutboundSender};
@@ -45,6 +46,7 @@ pub struct GatewayPipeline {
     policy: AccessPolicy,
     default_runtime: RuntimePreference,
     session_fail_fallback_event: bool,
+    operator_env_report: Arc<str>,
     metrics: Mutex<GatewayMetrics>,
 }
 
@@ -56,6 +58,7 @@ impl GatewayPipeline {
         policy: AccessPolicy,
         default_runtime: RuntimePreference,
         session_fail_fallback_event: bool,
+        operator_env_report: String,
     ) -> Self {
         Self {
             store,
@@ -64,6 +67,7 @@ impl GatewayPipeline {
             policy,
             default_runtime,
             session_fail_fallback_event,
+            operator_env_report: Arc::<str>::from(operator_env_report),
             metrics: Mutex::new(GatewayMetrics::default()),
         }
     }
@@ -115,13 +119,26 @@ impl GatewayPipeline {
             );
             return Ok(());
         };
+        if event.is_direct_message
+            && !self
+                .policy
+                .is_operator(event.channel, &event.user_id, &event.claims)
+        {
+            self.dispatch(
+                event.reply("direct messages are restricted to allowlisted operators.".to_string()),
+                None,
+            )
+            .await?;
+            return Ok(());
+        }
         if let Some(command) = Command::parse(&event.text) {
             self.handle_command(command, &event, &scope_key).await?;
             return Ok(());
         }
 
         if self.store.is_paused(&scope_key).await? {
-            let paused = event.reply("This session is paused. Use /resume (operator only).".to_string());
+            let paused =
+                event.reply("This session is paused. Use /resume (operator only).".to_string());
             self.dispatch(paused, None).await?;
             return Ok(());
         }
@@ -175,7 +192,10 @@ impl GatewayPipeline {
                         Ok(response) => response,
                         Err(second_err) => {
                             self.dispatch(
-                                event.reply("runtime error: request failed. try again or contact operator.".to_string()),
+                                event.reply(
+                                    "runtime error: request failed. try again or contact operator."
+                                        .to_string(),
+                                ),
                                 Some(RuntimeLogContext {
                                     provider: preference.provider,
                                     mode: effective_mode,
@@ -192,7 +212,10 @@ impl GatewayPipeline {
                     }
                 } else {
                     self.dispatch(
-                        event.reply("runtime error: request failed. try again or contact operator.".to_string()),
+                        event.reply(
+                            "runtime error: request failed. try again or contact operator."
+                                .to_string(),
+                        ),
                         Some(RuntimeLogContext {
                             provider: preference.provider,
                             mode: effective_mode,
@@ -251,7 +274,10 @@ impl GatewayPipeline {
         scope_key: &str,
     ) -> Result<()> {
         match command {
+            Command::Help => self.cmd_help(event).await?,
             Command::Status => self.cmd_status(event, scope_key).await?,
+            Command::NewSession => self.cmd_new_session(event, scope_key).await?,
+            Command::EnvVars => self.cmd_envvars(event).await?,
             Command::ProviderList => self.cmd_provider_list(event, scope_key).await?,
             Command::ProviderSet(provider) => {
                 self.cmd_provider_set(event, scope_key, provider).await?
@@ -266,23 +292,59 @@ impl GatewayPipeline {
         Ok(())
     }
 
+    async fn cmd_help(&self, event: &InboundEvent) -> Result<()> {
+        let is_operator = self
+            .policy
+            .is_operator(event.channel, &event.user_id, &event.claims);
+        self.dispatch(
+            event.reply(render_help_text(event.channel, is_operator)),
+            None,
+        )
+        .await
+    }
+
     async fn cmd_status(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
         let paused = self.store.is_paused(scope_key).await?;
         let status_text = if paused { "paused" } else { "active" };
         let preference = self.current_runtime_preference(scope_key).await?;
-        let session_id = if preference.mode == RuntimeMode::Session {
-            self.current_provider_session(scope_key, preference.provider)
+        let session_state = if preference.mode == RuntimeMode::Session {
+            if self
+                .current_provider_session(scope_key, preference.provider)
                 .await?
-                .unwrap_or_else(|| "-".to_string())
+                .is_some()
+            {
+                "active"
+            } else {
+                "none"
+            }
         } else {
-            "-".to_string()
+            "n/a"
         };
         let text = format!(
-            "status: {status_text} · scope={scope_key} · provider={} · mode={} · session={session_id}",
+            "status: {status_text} · scope={scope_key} · provider={} · mode={} · session={session_state}",
             preference.provider.as_str(),
             preference.mode.as_str()
         );
         self.dispatch(event.reply(text), None).await
+    }
+
+    async fn cmd_new_session(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
+        self.store.clear_provider_session(scope_key).await?;
+        self.dispatch(event.reply(format!("new session: {scope_key}")), None)
+            .await
+    }
+
+    async fn cmd_envvars(&self, event: &InboundEvent) -> Result<()> {
+        if !self.require_operator(event).await? {
+            return Ok(());
+        }
+
+        let report = if self.operator_env_report.trim().is_empty() {
+            "envvars: unavailable".to_string()
+        } else {
+            format!("envvars\n{}", self.operator_env_report)
+        };
+        self.dispatch(event.reply(report), None).await
     }
 
     async fn cmd_provider_list(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
@@ -320,7 +382,10 @@ impl GatewayPipeline {
             .await?;
 
         self.dispatch(
-            event.reply(format!("provider set: {} · scope={scope_key}", provider.as_str())),
+            event.reply(format!(
+                "provider set: {} · scope={scope_key}",
+                provider.as_str()
+            )),
             None,
         )
         .await
@@ -384,12 +449,7 @@ impl GatewayPipeline {
             .await
     }
 
-    async fn cmd_audit(
-        &self,
-        event: &InboundEvent,
-        scope_key: &str,
-        count: usize,
-    ) -> Result<()> {
+    async fn cmd_audit(&self, event: &InboundEvent, scope_key: &str, count: usize) -> Result<()> {
         if !self.require_operator(event).await? {
             return Ok(());
         }
@@ -414,7 +474,10 @@ impl GatewayPipeline {
     }
 
     async fn require_operator(&self, event: &InboundEvent) -> Result<bool> {
-        if self.policy.is_operator(event.channel, &event.user_id, &event.claims) {
+        if self
+            .policy
+            .is_operator(event.channel, &event.user_id, &event.claims)
+        {
             return Ok(true);
         }
         self.dispatch(
@@ -776,9 +839,17 @@ mod tests {
             user_id: user_id.to_string(),
             text: text.to_string(),
             received_at: Utc::now(),
+            is_direct_message: false,
             reply_token: None,
             claims: vec![],
             attachments: vec![],
+        }
+    }
+
+    fn direct_message_event(idempotency_key: &str, user_id: &str, text: &str) -> InboundEvent {
+        InboundEvent {
+            is_direct_message: true,
+            ..event_with_text(idempotency_key, user_id, text)
         }
     }
 
@@ -801,6 +872,7 @@ mod tests {
                 mode: RuntimeMode::Event,
             },
             false,
+            String::new(),
         );
 
         pipeline.handle_event(event("evt-1")).await?;
@@ -837,6 +909,7 @@ mod tests {
                 mode: RuntimeMode::Session,
             },
             false,
+            String::new(),
         );
 
         pipeline.handle_event(event("evt-1")).await?;
@@ -874,6 +947,7 @@ mod tests {
                 mode: RuntimeMode::Session,
             },
             false,
+            String::new(),
         );
 
         pipeline
@@ -908,6 +982,7 @@ mod tests {
                 mode: RuntimeMode::Session,
             },
             false,
+            String::new(),
         );
 
         pipeline
@@ -943,6 +1018,7 @@ mod tests {
                 mode: RuntimeMode::Session,
             },
             false,
+            String::new(),
         );
 
         let scope_key = session_key_for_event(&event("cmd-3"));
@@ -969,6 +1045,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn new_session_clears_sessions_for_any_user() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store.clone(),
+            runtime,
+            outbound.clone(),
+            AccessPolicy::new(Vec::<String>::new(), false),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Session,
+            },
+            false,
+            String::new(),
+        );
+
+        let scope_key = session_key_for_event(&event("cmd-4"));
+        store
+            .set_provider_session(&scope_key, ProviderKind::Claude, "sess-claude")
+            .await?;
+        store
+            .set_provider_session(&scope_key, ProviderKind::Codex, "sess-codex")
+            .await?;
+
+        pipeline
+            .handle_event(event_with_text("cmd-4", "user-1", "/new"))
+            .await?;
+
+        assert!(store
+            .get_provider_session(&scope_key, ProviderKind::Claude)
+            .await?
+            .is_none());
+        assert!(store
+            .get_provider_session(&scope_key, ProviderKind::Codex)
+            .await?
+            .is_none());
+
+        let actions = outbound.actions.lock().await;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].text, "new session: discord:chat-1".to_string());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn help_command_returns_user_visible_commands() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(None));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store,
+            runtime,
+            outbound.clone(),
+            AccessPolicy::new(Vec::<String>::new(), false),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Session,
+            },
+            false,
+            String::new(),
+        );
+
+        pipeline
+            .handle_event(event_with_text("cmd-help", "user-1", "/help"))
+            .await?;
+
+        let actions = outbound.actions.lock().await;
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].text.contains("/help - show available commands"));
+        assert!(actions[0]
+            .text
+            .contains("/new - start a fresh AI session for this chat"));
+        assert!(!actions[0].text.contains("/session_reset"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn direct_messages_require_allowlisted_operator() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store,
+            runtime,
+            outbound.clone(),
+            AccessPolicy::new(vec!["discord:admin-1".to_string()], false),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Session,
+            },
+            false,
+            String::new(),
+        );
+
+        pipeline
+            .handle_event(direct_message_event("dm-1", "user-1", "hello from dm"))
+            .await?;
+
+        let actions = outbound.actions.lock().await;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].text,
+            "direct messages are restricted to allowlisted operators.".to_string()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn session_failure_can_fallback_to_event_mode() -> Result<()> {
         let store = Arc::new(MemoryStore::default());
         let runtime = Arc::new(FlakySessionRuntime::default());
@@ -983,6 +1167,7 @@ mod tests {
                 mode: RuntimeMode::Session,
             },
             true,
+            String::new(),
         );
 
         let scope_key = session_key_for_event(&event("evt-fallback"));
@@ -1019,6 +1204,7 @@ mod tests {
                 mode: RuntimeMode::Event,
             },
             false,
+            String::new(),
         );
 
         let result = pipeline.handle_event(event("evt-fail")).await;
@@ -1030,6 +1216,70 @@ mod tests {
             actions[0].text,
             "runtime error: request failed. try again or contact operator.".to_string()
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn status_command_masks_session_identifier() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(None));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store.clone(),
+            runtime,
+            outbound.clone(),
+            AccessPolicy::new(Vec::<String>::new(), true),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Session,
+            },
+            false,
+            String::new(),
+        );
+
+        let scope_key = session_key_for_event(&event("evt-status"));
+        store
+            .set_provider_session(&scope_key, ProviderKind::Claude, "secret-session-id")
+            .await?;
+
+        pipeline
+            .handle_event(event_with_text("evt-status", "user-1", "/status"))
+            .await?;
+
+        let actions = outbound.actions.lock().await;
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].text.contains("session=active"));
+        assert!(!actions[0].text.contains("secret-session-id"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn envvars_command_returns_operator_runtime_summary() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(None));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store,
+            runtime,
+            outbound.clone(),
+            AccessPolicy::new(vec!["discord:user-1".to_string()], false),
+            RuntimePreference {
+                provider: ProviderKind::Codex,
+                mode: RuntimeMode::Session,
+            },
+            false,
+            "runtime_engine=cli\ndefault_provider=codex".to_string(),
+        );
+
+        pipeline
+            .handle_event(event_with_text("evt-envvars", "user-1", "/envvars"))
+            .await?;
+
+        let actions = outbound.actions.lock().await;
+        assert_eq!(actions.len(), 1);
+        assert!(actions[0].text.contains("envvars"));
+        assert!(actions[0].text.contains("runtime_engine=cli"));
+        assert!(actions[0].text.contains("default_provider=codex"));
         Ok(())
     }
 }

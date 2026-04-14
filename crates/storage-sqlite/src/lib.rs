@@ -1,11 +1,14 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
-use sqlx::{Row, SqlitePool};
+use sqlx_core::migrate::Migrator;
+use sqlx_core::query::query;
+use sqlx_core::row::Row;
+use sqlx_sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePool, SqlitePoolOptions};
 
 use orka_core::model::{
     AuditEntry, OutboundAction, ProviderKind, RuntimeLogContext, RuntimeMode, RuntimePreference,
@@ -16,10 +19,20 @@ use orka_core::{model::InboundEvent, session::session_key_for_event};
 #[derive(Clone)]
 pub struct SqliteStore {
     pool: SqlitePool,
+    store_full_payloads: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StorageOptions {
+    pub store_full_payloads: bool,
 }
 
 impl SqliteStore {
     pub async fn connect(database_url: &str) -> Result<Self> {
+        Self::connect_with_options(database_url, StorageOptions::default()).await
+    }
+
+    pub async fn connect_with_options(database_url: &str, storage: StorageOptions) -> Result<Self> {
         let options = SqliteConnectOptions::from_str(database_url)?
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
@@ -36,29 +49,43 @@ impl SqliteStore {
             .max_connections(5)
             .connect_with(options)
             .await?;
-        Ok(Self { pool })
+        Ok(Self {
+            pool,
+            store_full_payloads: storage.store_full_payloads,
+        })
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        sqlx::migrate!("../../migrations").run(&self.pool).await?;
+        let migrator = Migrator::new(resolve_runtime_migrations_dir()?).await?;
+        migrator.run(&self.pool).await?;
         Ok(())
+    }
+
+    fn payload_for_storage(&self, raw: &str) -> String {
+        if self.store_full_payloads {
+            raw.to_string()
+        } else {
+            redact_payload(raw)
+        }
     }
 }
 
 #[async_trait]
 impl EventStore for SqliteStore {
     async fn has_seen(&self, idempotency_key: &str) -> Result<bool> {
-        let row = sqlx::query("SELECT 1 FROM event_log WHERE idempotency_key = ? LIMIT 1")
-            .bind(idempotency_key)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row = query::<sqlx_sqlite::Sqlite>(
+            "SELECT 1 FROM event_log WHERE idempotency_key = ? LIMIT 1",
+        )
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row.is_some())
     }
 
     async fn save_inbound(&self, event: &InboundEvent) -> Result<()> {
         let now = Utc::now().to_rfc3339();
         let scope = session_key_for_event(event);
-        sqlx::query(
+        query::<sqlx_sqlite::Sqlite>(
             "INSERT INTO sessions(id, channel, chat_id, status, last_seen_at)
        VALUES(?, ?, ?, 'active', ?)
        ON CONFLICT(id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
@@ -70,7 +97,7 @@ impl EventStore for SqliteStore {
         .execute(&self.pool)
         .await?;
 
-        sqlx::query(
+        query::<sqlx_sqlite::Sqlite>(
             "INSERT OR IGNORE INTO event_log
        (idempotency_key, channel, direction, chat_id, user_id, payload_text, created_at)
        VALUES (?, ?, 'inbound', ?, ?, ?, ?)",
@@ -79,7 +106,7 @@ impl EventStore for SqliteStore {
         .bind(event.channel.as_str())
         .bind(&event.chat_id)
         .bind(&event.user_id)
-        .bind(&event.text)
+        .bind(self.payload_for_storage(&event.text))
         .bind(event.received_at.to_rfc3339())
         .execute(&self.pool)
         .await?;
@@ -91,14 +118,14 @@ impl EventStore for SqliteStore {
         action: &OutboundAction,
         runtime: Option<RuntimeLogContext>,
     ) -> Result<()> {
-        sqlx::query(
+        query::<sqlx_sqlite::Sqlite>(
             "INSERT INTO event_log
        (idempotency_key, channel, direction, chat_id, user_id, payload_text, created_at, provider_kind, runtime_mode, provider_latency_ms, provider_status)
        VALUES (NULL, ?, 'outbound', ?, NULL, ?, ?, ?, ?, ?, ?)",
         )
         .bind(action.channel.as_str())
         .bind(&action.chat_id)
-        .bind(&action.text)
+        .bind(self.payload_for_storage(&action.text))
         .bind(Utc::now().to_rfc3339())
         .bind(runtime.map(|ctx| ctx.provider.as_str().to_string()))
         .bind(runtime.map(|ctx| ctx.mode.as_str().to_string()))
@@ -110,10 +137,11 @@ impl EventStore for SqliteStore {
     }
 
     async fn is_paused(&self, scope_key: &str) -> Result<bool> {
-        let row = sqlx::query("SELECT paused FROM command_state WHERE scope_key = ?")
-            .bind(scope_key)
-            .fetch_optional(&self.pool)
-            .await?;
+        let row =
+            query::<sqlx_sqlite::Sqlite>("SELECT paused FROM command_state WHERE scope_key = ?")
+                .bind(scope_key)
+                .fetch_optional(&self.pool)
+                .await?;
         let paused = row
             .map(|row| row.try_get::<i64, _>("paused").unwrap_or(0) != 0)
             .unwrap_or(false);
@@ -121,7 +149,7 @@ impl EventStore for SqliteStore {
     }
 
     async fn set_paused(&self, scope_key: &str, paused: bool) -> Result<()> {
-        sqlx::query(
+        query::<sqlx_sqlite::Sqlite>(
             "INSERT INTO command_state(scope_key, paused, updated_at)
        VALUES(?, ?, ?)
        ON CONFLICT(scope_key) DO UPDATE SET paused=excluded.paused, updated_at=excluded.updated_at",
@@ -135,7 +163,7 @@ impl EventStore for SqliteStore {
     }
 
     async fn get_runtime_preference(&self, scope_key: &str) -> Result<Option<RuntimePreference>> {
-        let row = sqlx::query(
+        let row = query::<sqlx_sqlite::Sqlite>(
             "SELECT provider_kind, mode
        FROM provider_preferences
        WHERE scope_key = ?",
@@ -161,7 +189,7 @@ impl EventStore for SqliteStore {
         scope_key: &str,
         preference: &RuntimePreference,
     ) -> Result<()> {
-        sqlx::query(
+        query::<sqlx_sqlite::Sqlite>(
             "INSERT INTO provider_preferences(scope_key, provider_kind, mode, updated_at)
        VALUES(?, ?, ?, ?)
        ON CONFLICT(scope_key) DO UPDATE SET
@@ -183,7 +211,7 @@ impl EventStore for SqliteStore {
         scope_key: &str,
         provider: ProviderKind,
     ) -> Result<Option<String>> {
-        let row = sqlx::query(
+        let row = query::<sqlx_sqlite::Sqlite>(
             "SELECT provider_session_id
        FROM provider_sessions
        WHERE scope_key = ? AND provider_kind = ?",
@@ -202,7 +230,7 @@ impl EventStore for SqliteStore {
         provider: ProviderKind,
         session_id: &str,
     ) -> Result<()> {
-        sqlx::query(
+        query::<sqlx_sqlite::Sqlite>(
             "INSERT INTO provider_sessions(scope_key, provider_kind, provider_session_id, last_used_at, metadata_json)
        VALUES(?, ?, ?, ?, NULL)
        ON CONFLICT(scope_key, provider_kind) DO UPDATE SET
@@ -223,16 +251,18 @@ impl EventStore for SqliteStore {
         scope_key: &str,
         provider: ProviderKind,
     ) -> Result<()> {
-        sqlx::query("DELETE FROM provider_sessions WHERE scope_key = ? AND provider_kind = ?")
-            .bind(scope_key)
-            .bind(provider.as_str())
-            .execute(&self.pool)
-            .await?;
+        query::<sqlx_sqlite::Sqlite>(
+            "DELETE FROM provider_sessions WHERE scope_key = ? AND provider_kind = ?",
+        )
+        .bind(scope_key)
+        .bind(provider.as_str())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
     async fn clear_provider_session(&self, scope_key: &str) -> Result<()> {
-        sqlx::query("DELETE FROM provider_sessions WHERE scope_key = ?")
+        query::<sqlx_sqlite::Sqlite>("DELETE FROM provider_sessions WHERE scope_key = ?")
             .bind(scope_key)
             .execute(&self.pool)
             .await?;
@@ -240,11 +270,12 @@ impl EventStore for SqliteStore {
     }
 
     async fn query_recent_events(&self, scope_key: &str, limit: usize) -> Result<Vec<AuditEntry>> {
-        let rows = sqlx::query(
-            "SELECT direction, channel, chat_id, user_id, payload_text, created_at
-             FROM event_log
-             WHERE chat_id = (SELECT chat_id FROM sessions WHERE id = ? LIMIT 1)
-             ORDER BY id DESC
+        let rows = query::<sqlx_sqlite::Sqlite>(
+            "SELECT e.direction, e.channel, e.chat_id, e.user_id, e.payload_text, e.created_at
+             FROM event_log e
+             JOIN sessions s ON s.id = ?
+             WHERE e.channel = s.channel AND e.chat_id = s.chat_id
+             ORDER BY e.id DESC
              LIMIT ?",
         )
         .bind(scope_key)
@@ -269,17 +300,52 @@ impl EventStore for SqliteStore {
     }
 }
 
+fn redact_payload(raw: &str) -> String {
+    format!("[redacted {} chars]", raw.chars().count())
+}
+
+pub fn resolve_runtime_migrations_dir() -> Result<PathBuf> {
+    let mut candidates = Vec::new();
+
+    if let Ok(current_dir) = std::env::current_dir() {
+        candidates.push(current_dir.join("migrations"));
+    }
+
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            candidates.push(parent.join("migrations"));
+        }
+    }
+
+    candidates.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations"));
+
+    if let Some(found) = candidates.iter().find(|path| path.is_dir()) {
+        return Ok(found.clone());
+    }
+
+    anyhow::bail!(
+        "migrations directory not found; checked {}",
+        candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<String>>()
+            .join(", ")
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
 
     use anyhow::Result;
     use chrono::Utc;
-    use sqlx::Row;
+    use sqlx_core::query::query;
+    use sqlx_core::row::Row;
 
     use super::SqliteStore;
     use orka_core::model::{
-        Channel, OutboundAction, ProviderKind, ProviderStatus, RuntimeLogContext, RuntimeMode,
+        Channel, InboundEvent, OutboundAction, ProviderKind, ProviderStatus, RuntimeLogContext,
+        RuntimeMode,
     };
     use orka_core::ports::EventStore;
 
@@ -334,7 +400,7 @@ mod tests {
             )
             .await?;
 
-        let row = sqlx::query(
+        let row = query::<sqlx_sqlite::Sqlite>(
             "SELECT provider_kind, runtime_mode, provider_latency_ms, provider_status
              FROM event_log
              ORDER BY id DESC
@@ -356,6 +422,44 @@ mod tests {
             row.try_get::<String, _>("provider_status")?,
             "success".to_string()
         );
+
+        cleanup_sqlite_files(&path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connect_defaults_to_redacted_payload_storage() -> Result<()> {
+        let (database_url, path) = temp_db_url("payload-redaction");
+        let store = SqliteStore::connect(&database_url).await?;
+        store.migrate().await?;
+
+        store
+            .save_inbound(&InboundEvent {
+                idempotency_key: "evt-redacted".to_string(),
+                channel: Channel::Discord,
+                chat_id: "123".to_string(),
+                user_id: "user-1".to_string(),
+                text: "secret prompt".to_string(),
+                received_at: Utc::now(),
+                is_direct_message: false,
+                reply_token: None,
+                claims: vec![],
+                attachments: vec![],
+            })
+            .await?;
+
+        let row = query::<sqlx_sqlite::Sqlite>(
+            "SELECT payload_text
+             FROM event_log
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .fetch_one(&store.pool)
+        .await?;
+
+        let payload = row.try_get::<String, _>("payload_text")?;
+        assert_ne!(payload, "secret prompt".to_string());
+        assert!(payload.starts_with("[redacted "));
 
         cleanup_sqlite_files(&path);
         Ok(())
@@ -386,6 +490,50 @@ mod tests {
             .await?;
         assert!(claude.is_none());
         assert_eq!(codex.as_deref(), Some("codex-session"));
+
+        cleanup_sqlite_files(&path);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn query_recent_events_isolated_by_full_scope() -> Result<()> {
+        let (database_url, path) = temp_db_url("audit-scope");
+        let store = SqliteStore::connect(&database_url).await?;
+        store.migrate().await?;
+
+        store
+            .save_inbound(&InboundEvent {
+                idempotency_key: "discord-1".to_string(),
+                channel: Channel::Discord,
+                chat_id: "42".to_string(),
+                user_id: "discord-user".to_string(),
+                text: "discord-only".to_string(),
+                received_at: Utc::now(),
+                is_direct_message: false,
+                reply_token: None,
+                claims: vec![],
+                attachments: vec![],
+            })
+            .await?;
+        store
+            .save_inbound(&InboundEvent {
+                idempotency_key: "telegram-1".to_string(),
+                channel: Channel::Telegram,
+                chat_id: "42".to_string(),
+                user_id: "telegram-user".to_string(),
+                text: "telegram-only".to_string(),
+                received_at: Utc::now(),
+                is_direct_message: false,
+                reply_token: None,
+                claims: vec![],
+                attachments: vec![],
+            })
+            .await?;
+
+        let entries = store.query_recent_events("discord:42", 10).await?;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].channel, "discord".to_string());
+        assert!(entries[0].text.starts_with("[redacted "));
 
         cleanup_sqlite_files(&path);
         Ok(())

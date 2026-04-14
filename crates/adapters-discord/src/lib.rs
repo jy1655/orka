@@ -15,7 +15,7 @@ use serenity::model::id::ChannelId;
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
-use orka_core::model::{AttachmentMeta, Channel, InboundEvent, OutboundAction};
+use orka_core::model::{command_specs, AttachmentMeta, Channel, InboundEvent, OutboundAction};
 use orka_core::ports::OutboundSender;
 use orka_core::text::{chunk_text, normalize_text};
 
@@ -41,7 +41,7 @@ impl EventHandler for DiscordHandler {
             ready.user.id.get()
         );
 
-        let command = CreateCommand::new("ask")
+        let ask = CreateCommand::new("ask")
             .description("Send a prompt to the AI agent")
             .add_option(
                 CreateCommandOption::new(
@@ -51,11 +51,24 @@ impl EventHandler for DiscordHandler {
                 )
                 .required(true),
             );
-
-        if let Err(err) = serenity::all::Command::create_global_command(&ctx.http, command).await {
-            error!("failed to register /ask slash command: {err}");
+        if let Err(err) = serenity::all::Command::create_global_command(&ctx.http, ask).await {
+            error!("failed to register /ask global slash command: {err}");
         } else {
             info!("registered /ask global slash command");
+        }
+
+        for spec in command_specs() {
+            let command = CreateCommand::new(spec.name).description(spec.description);
+            if let Err(err) =
+                serenity::all::Command::create_global_command(&ctx.http, command).await
+            {
+                error!(
+                    "failed to register /{} global slash command: {err}",
+                    spec.name
+                );
+            } else {
+                info!("registered /{} global slash command", spec.name);
+            }
         }
     }
 
@@ -75,6 +88,7 @@ impl EventHandler for DiscordHandler {
             user_id: msg.author.id.get().to_string(),
             text,
             received_at: Utc::now(),
+            is_direct_message: msg.guild_id.is_none(),
             reply_token: None,
             claims: extract_member_claims(&msg.member),
             attachments: extract_attachments(&msg.attachments),
@@ -90,20 +104,11 @@ impl EventHandler for DiscordHandler {
             return;
         };
 
-        if command.data.name.as_str() != "ask" {
+        let Some(text) = interaction_command_text(&command) else {
             return;
-        }
+        };
 
-        let prompt = command
-            .data
-            .options
-            .iter()
-            .find(|opt| opt.name == "prompt")
-            .and_then(|opt| opt.value.as_str())
-            .unwrap_or_default()
-            .to_string();
-
-        let Some(text) = normalize_inbound_text(&prompt) else {
+        if command.data.name.as_str() == "ask" && text.is_empty() {
             if let Err(err) = command
                 .create_response(
                     &ctx.http,
@@ -147,6 +152,7 @@ impl EventHandler for DiscordHandler {
             user_id: command.user.id.get().to_string(),
             text,
             received_at: Utc::now(),
+            is_direct_message: command.guild_id.is_none(),
             reply_token: Some(format!("{application_id}:{interaction_token}")),
             claims: extract_interaction_claims(&command.member),
             attachments: vec![],
@@ -156,6 +162,28 @@ impl EventHandler for DiscordHandler {
             warn!("discord interaction inbound dropped: pipeline channel closed ({err})");
         }
     }
+}
+
+fn interaction_command_text(command: &serenity::all::CommandInteraction) -> Option<String> {
+    if command.data.name.as_str() == "ask" {
+        let prompt = command
+            .data
+            .options
+            .iter()
+            .find(|opt| opt.name == "prompt")
+            .and_then(|opt| opt.value.as_str())
+            .unwrap_or_default();
+        return Some(normalize_inbound_text(prompt).unwrap_or_default());
+    }
+
+    if command_specs()
+        .iter()
+        .any(|spec| spec.name == command.data.name.as_str())
+    {
+        return Some(format!("/{}", command.data.name));
+    }
+
+    None
 }
 
 impl DiscordAdapter {
@@ -277,9 +305,7 @@ impl DiscordOutbound {
 
         if chunks.len() > 1 {
             // Try to create a thread from the interaction response message
-            let thread_id = self
-                .try_create_thread(&body, channel_id)
-                .await;
+            let thread_id = self.try_create_thread(&body, channel_id).await;
 
             if let Some(thread_id) = thread_id {
                 for chunk in &chunks[1..] {
@@ -308,6 +334,26 @@ impl DiscordOutbound {
                     }
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    async fn send_channel_typing(&self, channel_id: ChannelId) -> Result<()> {
+        let url = format!(
+            "https://discord.com/api/v10/channels/{}/typing",
+            channel_id.get()
+        );
+        let response = self
+            .rest_client
+            .post(url)
+            .header("Authorization", format!("Bot {}", self.token))
+            .send()
+            .await
+            .context("failed to send discord typing signal")?;
+
+        if !response.status().is_success() {
+            bail!("discord typing failed: status={}", response.status());
         }
 
         Ok(())
@@ -365,7 +411,12 @@ impl OutboundSender for DiscordOutbound {
             if let Some((app_id_str, interaction_token)) = reply_token.split_once(':') {
                 if let Ok(app_id) = app_id_str.parse::<u64>() {
                     match self
-                        .send_interaction_response(app_id, interaction_token, channel_id, &action.text)
+                        .send_interaction_response(
+                            app_id,
+                            interaction_token,
+                            channel_id,
+                            &action.text,
+                        )
                         .await
                     {
                         Ok(()) => return Ok(()),
@@ -379,13 +430,27 @@ impl OutboundSender for DiscordOutbound {
 
         self.send_channel_message(channel_id, &action.text).await
     }
+
+    async fn send_typing(&self, channel: Channel, chat_id: &str) -> Result<()> {
+        if channel != Channel::Discord {
+            return Ok(());
+        }
+        if self.token.trim().is_empty() {
+            bail!("discord outbound unavailable: missing DISCORD_BOT_TOKEN");
+        }
+
+        let channel_id = parse_channel_id(chat_id)?;
+        self.send_channel_typing(channel_id).await
+    }
 }
 
 fn normalize_inbound_text(raw: &str) -> Option<String> {
     normalize_text(raw, MAX_INBOUND_CHARS)
 }
 
-fn extract_member_claims(member: &Option<Box<serenity::model::guild::PartialMember>>) -> Vec<String> {
+fn extract_member_claims(
+    member: &Option<Box<serenity::model::guild::PartialMember>>,
+) -> Vec<String> {
     let Some(member) = member else {
         return vec![];
     };
@@ -396,9 +461,7 @@ fn extract_member_claims(member: &Option<Box<serenity::model::guild::PartialMemb
         .collect()
 }
 
-fn extract_interaction_claims(
-    member: &Option<Box<serenity::model::guild::Member>>,
-) -> Vec<String> {
+fn extract_interaction_claims(member: &Option<Box<serenity::model::guild::Member>>) -> Vec<String> {
     let Some(member) = member else {
         return vec![];
     };

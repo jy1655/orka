@@ -9,6 +9,15 @@ pub enum RuntimeEngine {
     Cli,
 }
 
+impl RuntimeEngine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Echo => "echo",
+            Self::Cli => "cli",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ProviderCommandConfig {
     pub bin: String,
@@ -61,6 +70,7 @@ pub struct AppConfig {
     pub rate_limit_window_secs: u64,
     pub rate_limit_max_requests: usize,
     pub discord_use_embeds: bool,
+    pub store_full_payloads: bool,
 }
 
 impl AppConfig {
@@ -96,6 +106,7 @@ impl AppConfig {
         let rate_limit_window_secs = parse_u64_env("RATE_LIMIT_WINDOW_SECS", 60);
         let rate_limit_max_requests = parse_usize_env("RATE_LIMIT_MAX_REQUESTS", 0);
         let discord_use_embeds = parse_bool_env("DISCORD_USE_EMBEDS");
+        let store_full_payloads = parse_bool_env("STORE_FULL_PAYLOADS");
 
         Self {
             discord_bot_token,
@@ -114,7 +125,93 @@ impl AppConfig {
             rate_limit_window_secs,
             rate_limit_max_requests,
             discord_use_embeds,
+            store_full_payloads,
         }
+    }
+
+    pub fn operator_env_report(&self) -> String {
+        [
+            format!("runtime_engine={}", self.runtime_engine.as_str()),
+            format!("default_provider={}", self.default_provider.as_str()),
+            format!(
+                "default_runtime_mode={}",
+                self.default_runtime_mode.as_str()
+            ),
+            format!("provider_timeout_ms={}", self.cli_runtime.timeout_ms),
+            format!("max_output_bytes={}", self.cli_runtime.max_output_bytes),
+            format!("health_bind={}", self.health_bind),
+            format!("database_url={}", self.database_url),
+            format!(
+                "discord_bot_token={}",
+                configured_label(&self.discord_bot_token)
+            ),
+            format!(
+                "telegram_bot_token={}",
+                configured_label(&self.telegram_bot_token)
+            ),
+            format!("open_access={}", self.open_access),
+            format!("allowlist_entries={}", self.allowlist.len()),
+            format!("store_full_payloads={}", self.store_full_payloads),
+            format!(
+                "claude_bin={}",
+                configured_bin(&self.cli_runtime.claude.bin)
+            ),
+            format!(
+                "claude_event_args={}",
+                format_args(&self.cli_runtime.claude.event_args)
+            ),
+            format!(
+                "claude_session_args={}",
+                format_args(&self.cli_runtime.claude.session_args)
+            ),
+            format!("codex_bin={}", configured_bin(&self.cli_runtime.codex.bin)),
+            format!(
+                "codex_event_args={}",
+                format_args(&self.cli_runtime.codex.event_args)
+            ),
+            format!(
+                "codex_session_args={}",
+                format_args(&self.cli_runtime.codex.session_args)
+            ),
+            format!(
+                "opencode_bin={}",
+                configured_bin(&self.cli_runtime.opencode.bin)
+            ),
+            format!(
+                "opencode_event_args={}",
+                format_args(&self.cli_runtime.opencode.event_args)
+            ),
+            format!(
+                "opencode_session_args={}",
+                format_args(&self.cli_runtime.opencode.session_args)
+            ),
+        ]
+        .join("\n")
+    }
+}
+
+fn configured_label(value: &str) -> &'static str {
+    if value.trim().is_empty() {
+        "missing"
+    } else {
+        "configured"
+    }
+}
+
+fn configured_bin(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        "auto".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn format_args(args: &[String]) -> String {
+    if args.is_empty() {
+        "(built-in defaults)".to_string()
+    } else {
+        args.join(" ")
     }
 }
 
@@ -288,7 +385,8 @@ fn parse_args(raw: &str) -> Vec<String> {
 mod tests {
     use super::{
         parse_args, parse_bool, parse_positive_u64, parse_positive_usize, parse_provider_kind,
-        parse_runtime_engine, parse_runtime_mode, RuntimeEngine,
+        parse_runtime_engine, parse_runtime_mode, AppConfig, CliRuntimeConfig,
+        ProviderCommandConfig, RuntimeEngine,
     };
     use orka_core::model::{ProviderKind, RuntimeMode};
 
@@ -346,5 +444,54 @@ mod tests {
                 "--skip-git-repo-check".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn operator_env_report_masks_tokens_but_keeps_runtime_details() {
+        let cfg = AppConfig {
+            discord_bot_token: "secret-discord-token".to_string(),
+            telegram_bot_token: String::new(),
+            database_url: "sqlite://data/orka-gateway.db".to_string(),
+            health_bind: "127.0.0.1:8787".to_string(),
+            allowlist: vec!["discord:1".to_string()],
+            open_access: false,
+            default_provider: ProviderKind::Codex,
+            default_runtime_mode: RuntimeMode::Session,
+            session_fail_fallback_event: false,
+            shutdown_drain_timeout_ms: 10_000,
+            runtime_engine: RuntimeEngine::Cli,
+            cli_runtime: CliRuntimeConfig {
+                timeout_ms: 90_000,
+                max_output_bytes: 262_144,
+                claude: ProviderCommandConfig {
+                    bin: String::new(),
+                    event_args: vec![],
+                    session_args: vec![],
+                },
+                codex: ProviderCommandConfig {
+                    bin: "/usr/local/bin/codex".to_string(),
+                    event_args: vec!["exec".to_string(), "--json".to_string()],
+                    session_args: vec!["exec".to_string(), "--json".to_string()],
+                },
+                opencode: ProviderCommandConfig {
+                    bin: String::new(),
+                    event_args: vec![],
+                    session_args: vec![],
+                },
+            },
+            max_concurrent_tasks: 8,
+            rate_limit_window_secs: 60,
+            rate_limit_max_requests: 0,
+            discord_use_embeds: false,
+            store_full_payloads: false,
+        };
+
+        let report = cfg.operator_env_report();
+        assert!(report.contains("runtime_engine=cli"));
+        assert!(report.contains("default_provider=codex"));
+        assert!(report.contains("discord_bot_token=configured"));
+        assert!(report.contains("telegram_bot_token=missing"));
+        assert!(report.contains("codex_bin=/usr/local/bin/codex"));
+        assert!(!report.contains("secret-discord-token"));
     }
 }

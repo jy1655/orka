@@ -32,6 +32,7 @@
 | C-04 | Telegram API 오류 | API status 에러 | 재시도 루프 | rate-limit 대응 |
 | S-01 | SQLite 권한/잠금 오류 | store/migrate error | 요청 실패/부팅 실패 | DB 파일 권한/WAL 상태 점검 |
 | P-01 | 비인가 운영 명령 | `unauthorized` 응답 | 실행 차단 | `ALLOWLIST`/`OPEN_ACCESS` 재검토 |
+| P-02 | 비인가 DM 접근 | DM 거절 응답 | 런타임 미실행 | `ALLOWLIST`/DM 운영 정책 재검토 |
 
 ## 4. 현재 반영된 보호장치
 
@@ -62,10 +63,12 @@
 
 - Discord: 텍스트 수신/응답, bot message 무시
 - Telegram: polling 수신/응답, 네트워크 단절 후 백오프
+- `/help` 명령과 command menu/slash command 노출 확인
 
 ### 5.4 Security/Control
 
 - 비인가 사용자 `/provider set`, `/mode set`, `/session reset` 차단
+- 비allowlist DM 차단 + allowlist DM 성공 확인
 - operator 사용자 명령 성공 및 상태 반영 확인
 - `OPEN_ACCESS=true`는 로컬 테스트에서만 사용
 
@@ -105,7 +108,7 @@ No-Go:
 export DISCORD_BOT_TOKEN="invalid-token"
 export TELEGRAM_BOT_TOKEN=""
 export RUNTIME_ENGINE=echo
-cargo run -p openclaw-app
+cargo run -p orka-app
 ```
 
 기대 결과:
@@ -115,10 +118,10 @@ cargo run -p openclaw-app
 ### 8.2 S-01 SQLite 권한 오류
 
 ```bash
-mkdir -p /tmp/openclaw-readonly
-chmod 500 /tmp/openclaw-readonly
-export DATABASE_URL="sqlite:///tmp/openclaw-readonly/openclaw.db"
-cargo run -p openclaw-app
+mkdir -p /tmp/orka-readonly
+chmod 500 /tmp/orka-readonly
+export DATABASE_URL="sqlite:///tmp/orka-readonly/orka.db"
+cargo run -p orka-app
 ```
 
 기대 결과:
@@ -127,6 +130,6 @@ cargo run -p openclaw-app
 복구:
 
 ```bash
-chmod 700 /tmp/openclaw-readonly
+chmod 700 /tmp/orka-readonly
 unset DATABASE_URL
 ```

@@ -1,13 +1,17 @@
+mod cli;
 mod config;
+mod envfile;
 mod health;
+mod ops;
 mod outbound;
 mod runtime;
 
 use std::collections::HashMap;
+use std::env;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Error, Result};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{Mutex, Semaphore};
@@ -22,23 +26,52 @@ use runtime::CliAgentRuntime;
 
 use orka_adapters_discord::{DiscordAdapter, DiscordOutbound};
 use orka_adapters_telegram::{TelegramAdapter, TelegramOutbound};
-use orka_core::model::InboundEvent;
 use orka_core::model::RuntimePreference;
+use orka_core::model::{Channel, InboundEvent};
 use orka_core::pipeline::GatewayPipeline;
 use orka_core::policy::AccessPolicy;
 use orka_core::ports::{AgentRuntime, EchoAgentRuntime, EventStore, OutboundSender};
 use orka_core::rate_limit::RateLimiter;
 use orka_core::session::session_key_for_event;
-use orka_storage_sqlite::SqliteStore;
+use orka_storage_sqlite::{SqliteStore, StorageOptions};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing();
+    let args: Vec<String> = env::args().skip(1).collect();
+    let command = cli::parse_app_command(&args).map_err(Error::msg)?;
+    let cwd = env::current_dir()?;
+    let env_path = envfile::load_dotenv_upwards(&cwd)?;
+    let workspace_root = env_path
+        .as_deref()
+        .and_then(|path| path.parent())
+        .unwrap_or(cwd.as_path())
+        .to_path_buf();
 
-    let cfg = AppConfig::from_env();
+    match command {
+        cli::AppCommand::RunGateway => {
+            if cwd != workspace_root {
+                env::set_current_dir(&workspace_root)?;
+            }
+            init_tracing();
+            let cfg = AppConfig::from_env();
+            run_gateway(cfg).await
+        }
+        cli::AppCommand::Doctor => {
+            let cfg = AppConfig::from_env();
+            ops::run_doctor(&cfg, &workspace_root, env_path.as_deref())
+        }
+        cli::AppCommand::Status { deep } => {
+            let cfg = AppConfig::from_env();
+            ops::run_status(&cfg, &workspace_root, env_path.as_deref(), deep)
+        }
+        cli::AppCommand::Onboard { force } => ops::run_onboard(&workspace_root, force),
+    }
+}
+
+async fn run_gateway(cfg: AppConfig) -> Result<()> {
     info!("booting orka-gateway");
 
-    let store = init_store(&cfg.database_url).await?;
+    let store = init_store(&cfg).await?;
     let pipeline = build_pipeline(&cfg, store)?;
 
     let health_state = HealthState::new(pipeline.clone());
@@ -95,8 +128,31 @@ async fn main() -> Result<()> {
 type AdapterTask = JoinHandle<()>;
 type HealthTask = JoinHandle<Result<()>>;
 
-async fn init_store(database_url: &str) -> Result<Arc<dyn EventStore>> {
-    let store = SqliteStore::connect(database_url).await?;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatMode {
+    None,
+    Typing,
+    ReplyProgress,
+}
+
+fn heartbeat_mode_for_event(event: &InboundEvent) -> HeartbeatMode {
+    if event.reply_token.is_some() {
+        HeartbeatMode::ReplyProgress
+    } else if event.channel == Channel::Discord {
+        HeartbeatMode::Typing
+    } else {
+        HeartbeatMode::None
+    }
+}
+
+async fn init_store(cfg: &AppConfig) -> Result<Arc<dyn EventStore>> {
+    let store = SqliteStore::connect_with_options(
+        &cfg.database_url,
+        StorageOptions {
+            store_full_payloads: cfg.store_full_payloads,
+        },
+    )
+    .await?;
     store.migrate().await?;
     Ok(Arc::new(store))
 }
@@ -117,6 +173,7 @@ fn build_pipeline(cfg: &AppConfig, store: Arc<dyn EventStore>) -> Result<Arc<Gat
         policy,
         default_runtime,
         cfg.session_fail_fallback_event,
+        cfg.operator_env_report(),
     )))
 }
 
@@ -230,11 +287,11 @@ async fn run_main_loop(
               let task_concurrency = concurrency.clone();
               let task_scope_locks = scope_locks.clone();
 
-              let has_reply_token = event.reply_token.is_some();
-              let heartbeat_outbound = if has_reply_token {
-                Some(pipeline.outbound().clone())
-              } else {
+              let heartbeat_mode = heartbeat_mode_for_event(&event);
+              let heartbeat_outbound = if heartbeat_mode == HeartbeatMode::None {
                 None
+              } else {
+                Some(pipeline.outbound().clone())
               };
 
               inflight.spawn(async move {
@@ -270,18 +327,37 @@ async fn run_main_loop(
                 };
 
                 let heartbeat_handle = heartbeat_outbound.map(|outbound| {
-                  let action = event.reply(String::new());
+                  let heartbeat_event = event.clone();
                   tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
                     let mut elapsed_secs = 5u64;
                     loop {
-                      let mut progress = action.clone();
-                      progress.text = format!("Processing... ({elapsed_secs}s)");
-                      if let Err(err) = outbound.send(&progress).await {
+                      let result = match heartbeat_mode {
+                        HeartbeatMode::None => return,
+                        HeartbeatMode::Typing => {
+                          if elapsed_secs == 5 {
+                            outbound
+                              .send_typing(heartbeat_event.channel, &heartbeat_event.chat_id)
+                              .await
+                          } else {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            outbound
+                              .send_typing(heartbeat_event.channel, &heartbeat_event.chat_id)
+                              .await
+                          }
+                        }
+                        HeartbeatMode::ReplyProgress => {
+                          tokio::time::sleep(Duration::from_secs(5)).await;
+                          let mut progress = heartbeat_event.reply(String::new());
+                          progress.text = format!("Processing... ({elapsed_secs}s)");
+                          outbound.send(&progress).await
+                        }
+                      };
+
+                      if let Err(err) = result {
                         warn!("heartbeat send failed: {err}");
                         break;
                       }
-                      tokio::time::sleep(Duration::from_secs(5)).await;
+
                       elapsed_secs += 5;
                     }
                   })
@@ -314,9 +390,7 @@ async fn run_main_loop(
     Ok(())
 }
 
-async fn evict_unused_scope_locks(
-    scope_locks: &Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
-) {
+async fn evict_unused_scope_locks(scope_locks: &Arc<Mutex<HashMap<String, Arc<Semaphore>>>>) {
     let mut locks = scope_locks.lock().await;
     let before = locks.len();
     // An Arc with strong_count == 1 means only the HashMap holds it;
@@ -324,7 +398,11 @@ async fn evict_unused_scope_locks(
     locks.retain(|_, sem| Arc::strong_count(sem) > 1);
     let evicted = before - locks.len();
     if evicted > 0 {
-        info!(evicted, remaining = locks.len(), "evicted unused scope locks");
+        info!(
+            evicted,
+            remaining = locks.len(),
+            "evicted unused scope locks"
+        );
     }
 }
 
@@ -333,7 +411,10 @@ async fn await_inflight(inflight: &mut JoinSet<()>, timeout_ms: u64) {
         return;
     }
     let count = inflight.len();
-    info!(inflight_tasks = count, "waiting for in-flight tasks to complete");
+    info!(
+        inflight_tasks = count,
+        "waiting for in-flight tasks to complete"
+    );
 
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
@@ -414,4 +495,48 @@ fn init_tracing() {
         .with_target(true)
         .json()
         .init();
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::{heartbeat_mode_for_event, HeartbeatMode};
+    use orka_core::model::{Channel, InboundEvent};
+
+    fn inbound_event(channel: Channel, reply_token: Option<&str>) -> InboundEvent {
+        InboundEvent {
+            idempotency_key: "evt-1".to_string(),
+            channel,
+            chat_id: "123".to_string(),
+            user_id: "user-1".to_string(),
+            text: "hello".to_string(),
+            received_at: Utc::now(),
+            is_direct_message: false,
+            reply_token: reply_token.map(str::to_string),
+            claims: vec![],
+            attachments: vec![],
+        }
+    }
+
+    #[test]
+    fn heartbeat_mode_uses_typing_for_discord_messages_without_reply_token() {
+        let event = inbound_event(Channel::Discord, None);
+        assert_eq!(heartbeat_mode_for_event(&event), HeartbeatMode::Typing);
+    }
+
+    #[test]
+    fn heartbeat_mode_preserves_progress_edits_for_interactions() {
+        let event = inbound_event(Channel::Discord, Some("1:token"));
+        assert_eq!(
+            heartbeat_mode_for_event(&event),
+            HeartbeatMode::ReplyProgress
+        );
+    }
+
+    #[test]
+    fn heartbeat_mode_stays_disabled_for_plain_telegram_messages() {
+        let event = inbound_event(Channel::Telegram, None);
+        assert_eq!(heartbeat_mode_for_event(&event), HeartbeatMode::None);
+    }
 }

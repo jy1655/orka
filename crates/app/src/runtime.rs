@@ -489,6 +489,7 @@ mod tests {
                 user_id: "u1".to_string(),
                 text: "hello-runtime".to_string(),
                 received_at: Utc::now(),
+                is_direct_message: false,
                 reply_token: None,
                 claims: vec![],
                 attachments: vec![],

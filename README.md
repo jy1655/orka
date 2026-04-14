@@ -62,12 +62,20 @@
 - **Discord 봇 토큰** 또는 **Telegram 봇 토큰** (아래 설정 가이드 참고)
 - **AI CLI 도구** 중 하나 이상 설치 (`claude`, `codex`, `opencode`)
 
-### Step 1: 프로젝트 클론 및 환경파일 준비
+### Step 1: 프로젝트 클론 및 온보딩
 
 ```bash
 git clone <repository-url>
 cd cli-rs-gateway-DT
-cp .env.example .env
+cargo run -p orka-app -- onboard
+```
+
+`onboard`는 `.env.example`을 기준으로 `.env`를 만들고, PATH에서 발견한 `claude`/`codex`/`opencode` 바이너리를 자동으로 채워 넣습니다.
+
+이미 `.env`가 있으면 덮어쓰지 않습니다. 다시 생성하려면:
+
+```bash
+cargo run -p orka-app -- onboard --force
 ```
 
 ### Step 2: `.env` 파일 편집
@@ -90,13 +98,25 @@ OPEN_ACCESS=true
 
 > **`RUNTIME_ENGINE=echo`** 로 설정하면 AI를 실행하지 않고 입력을 그대로 돌려줍니다. 봇 연동만 먼저 테스트할 때 유용합니다.
 
-### Step 3: 빌드 및 실행
+### Step 3: 진단 실행
 
 ```bash
-# 환경변수 로드 후 실행
-set -a; source .env; set +a
+cargo run -p orka-app -- doctor
+```
+
+문제가 없으면 `0 error(s)`로 끝납니다. 더 자세한 현재 상태는 아래 명령으로 볼 수 있습니다:
+
+```bash
+cargo run -p orka-app -- status --deep
+```
+
+### Step 4: 빌드 및 실행
+
+```bash
 cargo run -p orka-app
 ```
+
+`orka-app`은 현재 디렉토리 또는 상위 디렉토리의 `.env`를 자동으로 로드합니다. 별도로 `source .env` 할 필요가 없습니다.
 
 다음 로그가 보이면 성공입니다:
 
@@ -107,9 +127,22 @@ cargo run -p orka-app
 {"level":"INFO","message":"gateway ready"}
 ```
 
-### Step 4: 테스트
+### Step 5: 테스트
 
-Discord에서 봇이 있는 채널에 메시지를 보내거나, `/ask prompt:안녕하세요` 슬래시 커맨드를 실행합니다.
+Discord 또는 Telegram에서 `/help`를 실행해 명령 목록이 보이는지 확인한 뒤, 메시지 1건 또는 Discord의 `/ask prompt:안녕하세요`를 실행합니다.
+
+### 로컬 운영 CLI
+
+```bash
+# .env 생성/갱신 보조
+cargo run -p orka-app -- onboard
+
+# 실행 전 점검
+cargo run -p orka-app -- doctor
+
+# 현재 설정/바이너리/DB 상태 상세 보기
+cargo run -p orka-app -- status --deep
+```
 
 ---
 
@@ -187,6 +220,12 @@ Bot 페이지 하단의 **Privileged Gateway Intents**에서 다음을 활성화
 봇:      main() 함수는 다음과 같은 역할을 합니다...
 ```
 
+### Telegram에서 AI와 대화하기
+
+- 일반 메시지를 보내면 바로 응답합니다.
+- 명령 목록은 Telegram command menu와 `/help`에서 확인할 수 있습니다.
+- operator 전용 명령은 allowlist 사용자에게만 적용됩니다.
+
 ### 대화 모드 이해하기
 
 | 모드 | 설명 | 언제 쓰나요? |
@@ -213,21 +252,30 @@ AI 응답이 Discord 메시지 길이 제한(2000자)을 초과하면:
 
 ## 채널 명령어
 
-채팅창에서 텍스트로 입력하는 운영 명령입니다. (Discord 슬래시 커맨드와는 별개)
+채팅창에서 텍스트로 입력할 수 있는 명령입니다. `Discord`와 `Telegram`에서는 `/help`로 바로 확인할 수 있고, command menu/slash command에도 노출됩니다.
 
 ### 누구나 사용 가능
 
 ```
+/help              사용 가능한 명령을 보여줍니다
 /status           현재 상태를 보여줍니다
-                  (scope, provider, mode, session ID)
+                  (scope, provider, mode, session 상태)
 
 /provider list    사용 가능한 provider 목록을 보여줍니다
                   (claude, codex, opencode + 현재 설정)
+/provider_list    위와 동일 (menu/slash command 별칭)
 ```
 
 **`/status` 응답 예시:**
 ```
-status: active · scope=discord:123456789 · provider=claude · mode=session · session=claude_discord_123_17099...
+status: active · scope=discord:123456789 · provider=claude · mode=session · session=active
+```
+
+### 사용자 명령
+
+```
+/new                    현재 채팅방의 AI 세션만 새로 시작합니다
+                        (대화 맥락이 꼬였을 때 사용)
 ```
 
 ### Operator 전용 명령
@@ -239,24 +287,35 @@ status: active · scope=discord:123456789 · provider=claude · mode=session · 
 /provider set codex     AI provider를 codex로 변경
 /provider set opencode  AI provider를 opencode로 변경
 
+/provider_claude        위와 동일 (menu/slash command 별칭)
+/provider_codex         위와 동일 (menu/slash command 별칭)
+/provider_opencode      위와 동일 (menu/slash command 별칭)
+
 /mode set session       대화 유지 모드로 변경
 /mode set event         단발 처리 모드로 변경
 
+/mode_session           위와 동일 (menu/slash command 별칭)
+/mode_event             위와 동일 (menu/slash command 별칭)
+
 /session reset          현재 채팅방의 모든 세션을 초기화합니다
                         (대화 맥락이 꼬였을 때 사용)
+/session_reset          위와 동일 (menu/slash command 별칭)
 
 /pause                  현재 채팅방의 AI 응답을 일시 중지합니다
 /resume                 일시 중지를 해제합니다
 
 /audit                  최근 10건의 이벤트 로그를 조회합니다
 /audit 30               최근 30건의 이벤트 로그를 조회합니다 (최대 50)
+
+/envvars                현재 프로세스의 런타임 설정 요약을 조회합니다
+                        (토큰 값은 숨기고 configured/missing만 표시)
 ```
 
 ---
 
 ## 권한 관리 (RBAC)
 
-게이트웨이는 **누가 operator 명령을 실행할 수 있는지**를 제어합니다. 일반 AI 대화는 모든 사용자가 가능하지만, provider 변경/일시정지 등의 운영 명령은 operator만 가능합니다.
+게이트웨이는 **누가 operator 명령을 실행할 수 있는지**를 제어합니다. 채널 내 일반 AI 대화는 누구나 가능하지만, provider 변경/일시정지 등의 운영 명령은 operator만 가능합니다. 또한 **DM(Discord DM / Telegram 개인 대화)은 allowlist된 operator만 사용할 수 있습니다.**
 
 ### 기본 설정
 
@@ -266,7 +325,7 @@ OPEN_ACCESS=true
 
 # 방법 2: 특정 사용자만 operator로 지정 (운영 환경 권장)
 OPEN_ACCESS=false
-ALLOWLIST=discord:123456789012345678
+ALLOWLIST=discord:<your_discord_user_id>
 ```
 
 ### ALLOWLIST 형식 상세
@@ -276,17 +335,17 @@ ALLOWLIST=discord:123456789012345678
 **사용자 ID 직접 지정:**
 ```env
 # 모든 채널에서 operator
-ALLOWLIST=123456789012345678
+ALLOWLIST=<your_user_id>
 
 # 특정 채널에서만 operator
-ALLOWLIST=discord:123456789012345678
-ALLOWLIST=telegram:987654321
+ALLOWLIST=discord:<your_discord_user_id>
+ALLOWLIST=telegram:<your_telegram_user_id>
 ```
 
 **Discord 역할 기반:**
 ```env
 # 특정 Discord 역할을 가진 모든 사용자에게 operator 부여
-ALLOWLIST=discord:role:111222333444555666
+ALLOWLIST=discord:role:<your_discord_role_id>
 
 # 모든 채널에서 해당 역할이면 operator
 ALLOWLIST=role:admin
@@ -294,8 +353,12 @@ ALLOWLIST=role:admin
 
 **여러 항목 혼합:**
 ```env
-ALLOWLIST=discord:123456789,discord:role:999888777,telegram:555444333
+ALLOWLIST=discord:<user_a>,discord:role:<ops_role_id>,telegram:<user_b>
 ```
+
+DM 정책:
+- allowlist에 없는 사용자가 DM으로 메시지를 보내면 작업을 실행하지 않고 거절 응답을 보냅니다.
+- 서버/그룹 채널 메시지는 기존처럼 일반 사용자도 사용할 수 있습니다.
 
 ### Discord 사용자 ID / 역할 ID 확인 방법
 
@@ -312,14 +375,14 @@ ALLOWLIST=discord:123456789,discord:role:999888777,telegram:555444333
 집 서버에 Codex를 설치해두고 Discord에서 원격으로 사용:
 
 ```env
-DISCORD_BOT_TOKEN=MTQ3N...your_token
+DISCORD_BOT_TOKEN=your_discord_bot_token
 RUNTIME_ENGINE=cli
 DEFAULT_PROVIDER=codex
 DEFAULT_RUNTIME_MODE=session
 SESSION_FAIL_FALLBACK_EVENT=true
 
 OPEN_ACCESS=false
-ALLOWLIST=discord:123456789012345678    # 본인 Discord ID
+ALLOWLIST=discord:<your_discord_user_id>    # 본인 Discord ID
 ```
 
 ```
@@ -341,13 +404,13 @@ Discord 채팅:
 팀원들이 Discord 서버에서 Claude/Codex를 공유:
 
 ```env
-DISCORD_BOT_TOKEN=MTQ3N...your_token
+DISCORD_BOT_TOKEN=your_discord_bot_token
 RUNTIME_ENGINE=cli
 DEFAULT_PROVIDER=claude
 DEFAULT_RUNTIME_MODE=event       # 팀원들이 섞여서 쓰므로 단발 모드
 
 OPEN_ACCESS=false
-ALLOWLIST=discord:role:123456    # "AI-Operator" 역할을 가진 사람만 설정 변경 가능
+ALLOWLIST=discord:role:<your_discord_role_id>    # "AI-Operator" 역할을 가진 사람만 설정 변경 가능
 
 MAX_CONCURRENT_TASKS=4           # 동시 4건까지 처리
 RATE_LIMIT_MAX_REQUESTS=5        # 채팅방당 분당 5건 제한
@@ -372,16 +435,18 @@ Discord 채팅:
 ### 예제 3: Discord + Telegram 동시 운영
 
 ```env
-DISCORD_BOT_TOKEN=MTQ3N...
-TELEGRAM_BOT_TOKEN=8147428550:AAF...
+DISCORD_BOT_TOKEN=your_discord_bot_token
+TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 
 RUNTIME_ENGINE=cli
 DEFAULT_PROVIDER=claude
 OPEN_ACCESS=false
-ALLOWLIST=discord:111222333,telegram:444555666
+ALLOWLIST=discord:<discord_user_id>,telegram:<telegram_user_id>
 ```
 
 각 채널은 독립적인 scope로 운영됩니다. Discord에서 `/provider set codex`를 실행해도 Telegram 채팅에는 영향 없습니다.
+
+Discord/Telegram의 DM scope는 allowlist 사용자에게만 열립니다.
 
 ---
 
@@ -400,13 +465,14 @@ ALLOWLIST=discord:111222333,telegram:444555666
 |---|---|---|
 | `DATABASE_URL` | `sqlite://data/orka-gateway.db` | SQLite 데이터베이스 파일 경로. 이벤트 로그, 세션, 설정이 저장됩니다. 경로의 디렉토리는 자동 생성됩니다. |
 | `HEALTH_BIND` | `127.0.0.1:8787` | Health/Metrics HTTP 서버가 바인딩할 주소. Prometheus 스크래핑이나 로드밸런서 헬스체크에 사용합니다. |
+| `STORE_FULL_PAYLOADS` | `false` | `false`이면 SQLite `event_log.payload_text`에 원문 대신 redacted placeholder만 저장합니다. 운영 환경에서는 기본값 유지가 권장됩니다. |
 
 ### 접근 정책
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `OPEN_ACCESS` | `false` | `true`이면 모든 사용자가 operator 명령을 실행할 수 있습니다. 개인 사용이나 테스트에 적합합니다. |
-| `ALLOWLIST` | (빈값) | operator로 허용할 사용자/역할 목록. 쉼표로 구분합니다. 형식은 위의 RBAC 섹션을 참고하세요. |
+| `OPEN_ACCESS` | `false` | `true`이면 모든 사용자가 operator 명령과 DM 대화를 사용할 수 있습니다. 개인 사용이나 테스트에 적합합니다. |
+| `ALLOWLIST` | (빈값) | operator로 허용할 사용자/역할 목록. 쉼표로 구분합니다. 형식은 위의 RBAC 섹션을 참고하세요. `OPEN_ACCESS=false`일 때는 allowlist 사용자만 DM 대화를 사용할 수 있습니다. |
 
 ### 런타임 엔진
 
@@ -593,6 +659,11 @@ MAX_OUTPUT_BYTES=524288    # 512KB
 
 세션이 깨진 경우:
 ```
+/new
+```
+
+운영자라면:
+```
 /session reset
 ```
 
@@ -634,7 +705,7 @@ cli-rs-gateway-DT/
 │   ├── adapters-discord/      # Discord Gateway + REST API
 │   ├── adapters-telegram/     # Telegram Long Polling + REST API
 │   └── storage-sqlite/        # SQLite 기반 EventStore 구현
-├── migrations/                # SQLite 마이그레이션 SQL (바이너리에 임베드됨)
+├── migrations/                # SQLite 마이그레이션 SQL (런타임에 ./migrations 에서 로드)
 ├── scripts/
 │   └── windows/               # Windows 배포 스크립트
 │       ├── setup.ps1          # 전제조건 자동 설치 (VC++ Runtime, pwsh7, Node.js, Codex)

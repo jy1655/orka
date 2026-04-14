@@ -199,6 +199,8 @@ pub struct InboundEvent {
     pub user_id: String,
     pub text: String,
     pub received_at: DateTime<Utc>,
+    #[serde(default)]
+    pub is_direct_message: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_token: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -229,17 +231,129 @@ pub struct OutboundAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
+    Help,
     Status,
+    EnvVars,
     Pause,
     Resume,
     ProviderList,
     ProviderSet(ProviderKind),
     ModeSet(RuntimeMode),
+    NewSession,
     SessionReset,
     Audit(usize),
 }
 
 const MAX_AUDIT_COUNT: usize = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommandSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub operator_only: bool,
+}
+
+const COMMAND_SPECS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "help",
+        description: "show available commands",
+        operator_only: false,
+    },
+    CommandSpec {
+        name: "status",
+        description: "show current scope, provider, and mode",
+        operator_only: false,
+    },
+    CommandSpec {
+        name: "new",
+        description: "start a fresh AI session for this chat",
+        operator_only: false,
+    },
+    CommandSpec {
+        name: "audit",
+        description: "show the recent audit log for this chat",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "provider_list",
+        description: "show available providers",
+        operator_only: false,
+    },
+    CommandSpec {
+        name: "provider_claude",
+        description: "switch this chat to claude",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "provider_codex",
+        description: "switch this chat to codex",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "provider_opencode",
+        description: "switch this chat to opencode",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "mode_session",
+        description: "keep one provider session for this chat",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "mode_event",
+        description: "use stateless event mode for this chat",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "session_reset",
+        description: "clear all cached provider sessions for this chat",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "pause",
+        description: "pause AI replies for this chat",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "resume",
+        description: "resume AI replies for this chat",
+        operator_only: true,
+    },
+    CommandSpec {
+        name: "envvars",
+        description: "show the runtime environment summary",
+        operator_only: true,
+    },
+];
+
+pub fn command_specs() -> &'static [CommandSpec] {
+    COMMAND_SPECS
+}
+
+pub fn render_help_text(channel: Channel, is_operator: bool) -> String {
+    let mut lines = Vec::new();
+    lines.push("commands:".to_string());
+    if channel == Channel::Discord {
+        lines.push("/ask <prompt> - ask without sending a plain message".to_string());
+    }
+
+    for spec in command_specs().iter().filter(|spec| !spec.operator_only) {
+        lines.push(format!("/{} - {}", spec.name, spec.description));
+    }
+
+    if is_operator {
+        lines.push(String::new());
+        lines.push("operator:".to_string());
+        for spec in command_specs().iter().filter(|spec| spec.operator_only) {
+            lines.push(format!("/{} - {}", spec.name, spec.description));
+        }
+    } else {
+        lines.push(String::new());
+        lines.push("operator commands are available only to allowlisted users.".to_string());
+    }
+
+    lines.join("\n")
+}
 
 impl Command {
     pub fn parse(text: &str) -> Option<Self> {
@@ -247,7 +361,23 @@ impl Command {
         let command = tokens.next()?.to_ascii_lowercase();
 
         match command.as_str() {
+            "/help" if tokens.next().is_none() => Some(Self::Help),
             "/status" if tokens.next().is_none() => Some(Self::Status),
+            "/new" if tokens.next().is_none() => Some(Self::NewSession),
+            "/provider_list" if tokens.next().is_none() => Some(Self::ProviderList),
+            "/provider_claude" if tokens.next().is_none() => {
+                Some(Self::ProviderSet(ProviderKind::Claude))
+            }
+            "/provider_codex" if tokens.next().is_none() => {
+                Some(Self::ProviderSet(ProviderKind::Codex))
+            }
+            "/provider_opencode" if tokens.next().is_none() => {
+                Some(Self::ProviderSet(ProviderKind::Opencode))
+            }
+            "/mode_session" if tokens.next().is_none() => Some(Self::ModeSet(RuntimeMode::Session)),
+            "/mode_event" if tokens.next().is_none() => Some(Self::ModeSet(RuntimeMode::Event)),
+            "/session_reset" if tokens.next().is_none() => Some(Self::SessionReset),
+            "/envvars" if tokens.next().is_none() => Some(Self::EnvVars),
             "/pause" if tokens.next().is_none() => Some(Self::Pause),
             "/resume" if tokens.next().is_none() => Some(Self::Resume),
             "/audit" => {
@@ -299,11 +429,17 @@ impl Command {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_scope_key, normalize_session_id, Command, ProviderKind, RuntimeMode};
+    use super::{
+        normalize_scope_key, normalize_session_id, render_help_text, Channel, Command,
+        ProviderKind, RuntimeMode,
+    };
 
     #[test]
     fn parse_legacy_commands() {
+        assert_eq!(Command::parse("/help"), Some(Command::Help));
         assert_eq!(Command::parse("/status"), Some(Command::Status));
+        assert_eq!(Command::parse("/new"), Some(Command::NewSession));
+        assert_eq!(Command::parse("/envvars"), Some(Command::EnvVars));
         assert_eq!(Command::parse("/pause"), Some(Command::Pause));
         assert_eq!(Command::parse("/resume"), Some(Command::Resume));
     }
@@ -323,6 +459,23 @@ mod tests {
             Some(Command::ModeSet(RuntimeMode::Event))
         );
         assert_eq!(
+            Command::parse("/provider_list"),
+            Some(Command::ProviderList)
+        );
+        assert_eq!(
+            Command::parse("/provider_codex"),
+            Some(Command::ProviderSet(ProviderKind::Codex))
+        );
+        assert_eq!(
+            Command::parse("/mode_session"),
+            Some(Command::ModeSet(RuntimeMode::Session))
+        );
+        assert_eq!(
+            Command::parse("/session_reset"),
+            Some(Command::SessionReset)
+        );
+        assert_eq!(Command::parse("/new"), Some(Command::NewSession));
+        assert_eq!(
             Command::parse("/session reset"),
             Some(Command::SessionReset)
         );
@@ -334,8 +487,26 @@ mod tests {
         assert_eq!(Command::parse("/provider set"), None);
         assert_eq!(Command::parse("/provider set unknown"), None);
         assert_eq!(Command::parse("/mode set unknown"), None);
+        assert_eq!(Command::parse("/help now"), None);
         assert_eq!(Command::parse("/session"), None);
         assert_eq!(Command::parse("/session reset now"), None);
+    }
+
+    #[test]
+    fn render_help_text_hides_operator_commands_for_regular_users() {
+        let help = render_help_text(Channel::Telegram, false);
+        assert!(help.contains("/help - show available commands"));
+        assert!(help.contains("/new - start a fresh AI session for this chat"));
+        assert!(help.contains("/provider_list - show available providers"));
+        assert!(!help.contains("/session_reset"));
+    }
+
+    #[test]
+    fn render_help_text_includes_operator_commands_for_operators() {
+        let help = render_help_text(Channel::Discord, true);
+        assert!(help.contains("/ask <prompt> - ask without sending a plain message"));
+        assert!(help.contains("/provider_codex - switch this chat to codex"));
+        assert!(help.contains("/session_reset - clear all cached provider sessions for this chat"));
     }
 
     #[test]

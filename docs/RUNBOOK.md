@@ -2,7 +2,7 @@
 
 ## 1. 목적
 
-이 문서는 `openclaw-rs-gateway` 운영 시 필요한 표준 절차를 정리한다.
+이 문서는 `Orka Gateway` 운영 시 필요한 표준 절차를 정리한다.
 
 - 기동
 - 실시간 검증
@@ -25,8 +25,10 @@ cp .env.example .env
 - `RUNTIME_ENGINE=echo|cli`
 - `DEFAULT_PROVIDER=claude|codex|opencode`
 - `DEFAULT_RUNTIME_MODE=session|event`
+- `STORE_FULL_PAYLOADS=false` 권장
 - 운영 권한
   - 권장: `OPEN_ACCESS=false`, `ALLOWLIST=discord:<user_id>,telegram:<user_id>`
+  - DM을 쓸 사용자는 반드시 `ALLOWLIST`에 포함
 
 주의:
 - 잘못된 설정값(예: `DEFAULT_PROVIDER=claud`, `DEFAULT_RUNTIME_MODE=sesion`, `PROVIDER_TIMEOUT_MS=abc`)은
@@ -49,13 +51,18 @@ CLI 호출 안전성:
 ## 3. 기동 절차
 
 ```bash
-set -a; source .env; set +a
-cargo run -p openclaw-app
+cargo run -p orka-app -- doctor
+cargo run -p orka-app
 ```
+
+참고:
+- `cargo run -p orka-app -- onboard` 는 `.env`를 생성/갱신하는 보조 명령이다.
+- `cargo run -p orka-app -- status --deep` 는 현재 설정/바이너리/DB 상태를 한 번에 보여준다.
+- `orka-app`은 현재 디렉토리 또는 상위 디렉토리의 `.env`를 자동으로 로드한다.
 
 정상 기동 로그 기준:
 
-- `booting openclaw-rs-gateway`
+- `booting orka-gateway`
 - `health server listening on ...`
 - `gateway ready`
 - Discord 사용 시: `discord adapter ready as ...`
@@ -71,10 +78,10 @@ curl -sS http://127.0.0.1:8787/metrics
 
 핵심 지표:
 
-- `openclaw_inbound_total`
-- `openclaw_outbound_total`
-- `openclaw_error_total`
-- `openclaw_provider_requests_total{provider,mode,status}`
+- `orka_inbound_total`
+- `orka_outbound_total`
+- `orka_error_total`
+- `orka_provider_requests_total{provider,mode,status}`
 
 ## 5. 채널 기능 검증
 
@@ -82,8 +89,11 @@ curl -sS http://127.0.0.1:8787/metrics
 - 예: `ping`
 
 2. 운영 명령 확인
+- `/help`
 - `/status`
+- `/new`
 - `/provider list`
+- `/envvars`
 
 3. operator 명령 확인(운영자 계정으로 실행)
 - `/provider set codex` (또는 `claude`, `opencode`)
@@ -92,21 +102,22 @@ curl -sS http://127.0.0.1:8787/metrics
 
 4. 응답 확인
 - inbound/outbound 모두 생성되어야 정상
+- Telegram command menu와 Discord slash/menu에서 명령이 보이는지 확인
 
 ## 6. DB 검증 명령
 
 ```bash
-sqlite3 data/openclaw-rs-gateway.db \
+sqlite3 data/orka-gateway.db \
   "SELECT channel,direction,count(*) FROM event_log GROUP BY channel,direction ORDER BY channel,direction;"
 ```
 
 ```bash
-sqlite3 data/openclaw-rs-gateway.db \
+sqlite3 data/orka-gateway.db \
   "SELECT id,channel,direction,chat_id,user_id,payload_text,provider_kind,runtime_mode,provider_status,provider_latency_ms,created_at FROM event_log ORDER BY id DESC LIMIT 20;"
 ```
 
 ```bash
-sqlite3 data/openclaw-rs-gateway.db \
+sqlite3 data/orka-gateway.db \
   "SELECT id,channel,chat_id,status,last_seen_at FROM sessions ORDER BY last_seen_at DESC LIMIT 20;"
 ```
 
@@ -139,9 +150,10 @@ sqlite3 data/openclaw-rs-gateway.db \
 - session 모드에서 반복 실패
 
 조치:
-1. `/session reset`
-2. 필요 시 `/mode set event`
-3. 필요 시 `/provider set ...` 전환
+1. 일반 사용자: `/new`
+2. 운영자: `/session reset`
+3. 필요 시 `/mode set event`
+4. 필요 시 `/provider set ...` 전환
 
 ### 7.4 Discord 메시지 미수신
 
@@ -156,6 +168,7 @@ sqlite3 data/openclaw-rs-gateway.db \
 1. 토큰 유효성
 2. 네트워크/API 접근 상태
 3. getUpdates를 다른 프로세스가 소모하고 있지 않은지
+4. `getMyCommands`에 명령 목록이 등록되어 있는지
 
 ## 8. 안전 종료
 
@@ -169,6 +182,7 @@ sqlite3 data/openclaw-rs-gateway.db \
 ## 9. 운영 수칙
 
 - 운영 환경에서 `OPEN_ACCESS=true` 사용 금지
+- DM 사용자는 `ALLOWLIST` 기준으로만 운영
 - provider 전환/모드 전환 시각과 사유 기록
 - 장애 테스트는 소규모 채널에서 먼저 수행
 - 변경 후 최소 1회 smoke test(Discord/Telegram 중 사용 채널) 수행
