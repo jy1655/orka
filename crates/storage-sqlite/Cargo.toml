@@ -8,7 +8,8 @@ license.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
-sqlx.workspace = true
+sqlx-core.workspace = true
+sqlx-sqlite.workspace = true
 orka-core = { path = "../core" }
 
 [dev-dependencies]

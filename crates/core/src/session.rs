@@ -32,6 +32,7 @@ mod tests {
             user_id: "u-1".to_string(),
             text: "hello".to_string(),
             received_at: Utc::now(),
+            is_direct_message: false,
             reply_token: None,
             claims: vec![],
             attachments: vec![],

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::model::{
-    AuditEntry, InboundEvent, OutboundAction, ProviderKind, RuntimeInvokeRequest,
+    AuditEntry, Channel, InboundEvent, OutboundAction, ProviderKind, RuntimeInvokeRequest,
     RuntimeInvokeResponse, RuntimeLogContext, RuntimePreference,
 };
 
@@ -47,6 +47,10 @@ pub trait EventStore: Send + Sync {
 #[async_trait]
 pub trait OutboundSender: Send + Sync {
     async fn send(&self, action: &OutboundAction) -> Result<()>;
+
+    async fn send_typing(&self, _channel: Channel, _chat_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]

@@ -77,10 +77,7 @@ async fn metrics(State(state): State<HealthState>) -> impl IntoResponse {
 fn render_metrics(snapshot: GatewayMetricsSnapshot) -> String {
     let mut body = String::new();
     body.push_str("# TYPE orka_inbound_total counter\n");
-    body.push_str(&format!(
-        "orka_inbound_total {}\n",
-        snapshot.inbound_total
-    ));
+    body.push_str(&format!("orka_inbound_total {}\n", snapshot.inbound_total));
     body.push_str("# TYPE orka_outbound_total counter\n");
     body.push_str(&format!(
         "orka_outbound_total {}\n",

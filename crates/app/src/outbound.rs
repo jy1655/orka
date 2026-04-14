@@ -26,4 +26,11 @@ impl OutboundSender for MultiplexOutbound {
             Channel::Telegram => self.telegram.send(action).await,
         }
     }
+
+    async fn send_typing(&self, channel: Channel, chat_id: &str) -> Result<()> {
+        match channel {
+            Channel::Discord => self.discord.send_typing(channel, chat_id).await,
+            Channel::Telegram => self.telegram.send_typing(channel, chat_id).await,
+        }
+    }
 }

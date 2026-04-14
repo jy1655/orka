@@ -5,7 +5,7 @@
 ## Workspace Layout
 
 ```text
-openclaw-rs-gateway/
+orka-gateway/
   Cargo.toml
   crates/
     app/

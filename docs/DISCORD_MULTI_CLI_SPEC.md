@@ -2,7 +2,7 @@
 
 ## 1. 목적
 
-이 문서는 현재 `openclaw-rs-gateway` 구현 기준의 runtime 동작 규칙을 정리한다.
+이 문서는 현재 `orka-gateway` 구현 기준의 runtime 동작 규칙을 정리한다.
 
 - 입력 채널: Discord, Telegram
 - 실행 backend: Claude Code CLI, Codex CLI, OpenCode CLI
@@ -87,7 +87,9 @@ Discord/Telegram Adapter
 ## 7. 운영 제어 명령
 
 - 공통
+  - `/help`
   - `/status`
+  - `/new`
   - `/provider list`
 - operator only
   - `/provider set <claude|codex|opencode>`
@@ -95,12 +97,22 @@ Discord/Telegram Adapter
   - `/session reset`
   - `/pause`
   - `/resume`
+  - `/envvars`
+  - `/audit [count]`
+
+명령 노출:
+- Discord: `/ask` + global slash command로 `help`, `status`, `new`, `provider_*`, `mode_*`, `session_reset` 등을 노출
+- Telegram: `setMyCommands`로 `help`, `status`, `new`, `provider_*`, `mode_*`, `session_reset` 등을 노출
+- 텍스트 입력은 기존 공백 형식(`/provider set codex`)과 menu 친화적 별칭(`/provider_codex`)을 모두 지원
 
 권한 정책:
 - `OPEN_ACCESS=true`면 모든 사용자가 operator
 - 아니면 `ALLOWLIST`와 매칭되는 사용자만 operator
   - `user_id`
   - `channel:user_id`
+  - `role:*`
+- DM(Discord DM / Telegram private chat)은 allowlist 사용자만 허용
+- 비allowlist DM은 런타임 실행 없이 거절 응답 반환
 
 ## 8. 데이터 모델
 
@@ -130,10 +142,10 @@ HTTP:
 - `/metrics`
 
 메트릭:
-- `openclaw_inbound_total`
-- `openclaw_outbound_total`
-- `openclaw_error_total`
-- `openclaw_provider_requests_total{provider,mode,status}`
+- `orka_inbound_total`
+- `orka_outbound_total`
+- `orka_error_total`
+- `orka_provider_requests_total{provider,mode,status}`
 
 ## 10. 보안 기준
 

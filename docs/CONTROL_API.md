@@ -4,9 +4,9 @@
 
 ## 현재 상태
 
-- `openclaw-rs-gateway` 현재 런타임에서는 HTTP Control API를 노출하지 않습니다.
+- `orka-gateway` 현재 런타임에서는 HTTP Control API를 노출하지 않습니다.
 - `main.rs`에서 control server 배선이 제거되어 `/control/v1/*` 엔드포인트는 활성화되지 않습니다.
-- 현재 운영 제어는 채널 명령(`/provider`, `/mode`, `/session`, `/pause`, `/resume`)으로 수행합니다.
+- 현재 운영 제어는 채널 명령(`/help`, `/status`, `/new`, `/provider ...`, `/mode ...`, `/session ...`, `/pause`, `/resume`)으로 수행합니다.
 
 ## 왜 비활성화했는가
 

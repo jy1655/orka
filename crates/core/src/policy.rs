@@ -90,38 +90,16 @@ mod tests {
 
     #[test]
     fn role_claim_grants_operator() {
-        let policy = AccessPolicy::new(
-            vec!["discord:role:123456".to_string()],
-            false,
-        );
+        let policy = AccessPolicy::new(vec!["discord:role:123456".to_string()], false);
         assert!(!policy.is_operator(Channel::Discord, "user-1", &[]));
-        assert!(policy.is_operator(
-            Channel::Discord,
-            "user-1",
-            &["role:123456".to_string()]
-        ));
-        assert!(!policy.is_operator(
-            Channel::Telegram,
-            "user-1",
-            &["role:123456".to_string()]
-        ));
+        assert!(policy.is_operator(Channel::Discord, "user-1", &["role:123456".to_string()]));
+        assert!(!policy.is_operator(Channel::Telegram, "user-1", &["role:123456".to_string()]));
     }
 
     #[test]
     fn global_role_claim_grants_operator_on_any_channel() {
-        let policy = AccessPolicy::new(
-            vec!["role:admin".to_string()],
-            false,
-        );
-        assert!(policy.is_operator(
-            Channel::Discord,
-            "user-1",
-            &["role:admin".to_string()]
-        ));
-        assert!(policy.is_operator(
-            Channel::Telegram,
-            "user-1",
-            &["role:admin".to_string()]
-        ));
+        let policy = AccessPolicy::new(vec!["role:admin".to_string()], false);
+        assert!(policy.is_operator(Channel::Discord, "user-1", &["role:admin".to_string()]));
+        assert!(policy.is_operator(Channel::Telegram, "user-1", &["role:admin".to_string()]));
     }
 }

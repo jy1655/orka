@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
-use orka_core::model::{Channel, InboundEvent, OutboundAction};
+use orka_core::model::{command_specs, Channel, InboundEvent, OutboundAction};
 use orka_core::ports::OutboundSender;
 use orka_core::text::{normalize_text, normalize_text_with_fallback};
 
@@ -41,6 +41,10 @@ impl TelegramAdapter {
         if !self.is_enabled() {
             warn!("telegram adapter disabled: TELEGRAM_BOT_TOKEN is empty");
             return Ok(());
+        }
+
+        if let Err(err) = self.register_commands().await {
+            warn!("telegram setMyCommands failed: {err}");
         }
 
         info!("telegram adapter started (polling mode)");
@@ -101,6 +105,40 @@ impl TelegramAdapter {
             }
         }
 
+        Ok(())
+    }
+
+    async fn register_commands(&self) -> Result<()> {
+        let request = SetMyCommandsRequest {
+            commands: telegram_bot_commands(),
+        };
+
+        let response = self
+            .client
+            .post(telegram_method_url(&self.token, "setMyCommands"))
+            .json(&request)
+            .send()
+            .await
+            .context("telegram setMyCommands request failed")?;
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .context("telegram setMyCommands response read failed")?;
+        if !status.is_success() {
+            bail!("telegram setMyCommands failed: status={status}");
+        }
+
+        let parsed: TelegramResponse<serde_json::Value> =
+            serde_json::from_str(&body).context("telegram setMyCommands payload decode failed")?;
+        if !parsed.ok {
+            let reason = parsed
+                .description
+                .unwrap_or_else(|| "unknown telegram api error".to_string());
+            bail!("telegram setMyCommands api error: {reason}");
+        }
+
+        info!("registered telegram bot commands");
         Ok(())
     }
 }
@@ -180,6 +218,17 @@ struct SendMessageRequest {
     text: String,
 }
 
+#[derive(Debug, Serialize)]
+struct SetMyCommandsRequest {
+    commands: Vec<TelegramBotCommand>,
+}
+
+#[derive(Debug, Serialize)]
+struct TelegramBotCommand {
+    command: String,
+    description: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct TelegramResponse<T> {
     ok: bool,
@@ -208,6 +257,8 @@ struct TelegramMessage {
 #[derive(Debug, Deserialize)]
 struct TelegramChat {
     id: i64,
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -219,6 +270,16 @@ struct TelegramUser {
 
 fn telegram_method_url(token: &str, method: &str) -> String {
     format!("https://api.telegram.org/bot{}/{method}", token.trim())
+}
+
+fn telegram_bot_commands() -> Vec<TelegramBotCommand> {
+    command_specs()
+        .iter()
+        .map(|spec| TelegramBotCommand {
+            command: spec.name.to_string(),
+            description: spec.description.to_string(),
+        })
+        .collect()
 }
 
 fn update_to_inbound(update: TelegramUpdate) -> Option<InboundEvent> {
@@ -236,6 +297,7 @@ fn update_to_inbound(update: TelegramUpdate) -> Option<InboundEvent> {
         user_id: user.id.to_string(),
         text,
         received_at: Utc::now(),
+        is_direct_message: message.chat.kind == "private",
         reply_token: None,
         claims: vec![],
         attachments: vec![],
@@ -276,7 +338,10 @@ mod tests {
             update_id: 10,
             message: Some(TelegramMessage {
                 message_id: 22,
-                chat: TelegramChat { id: 333 },
+                chat: TelegramChat {
+                    id: 333,
+                    kind: "private".to_string(),
+                },
                 from: Some(TelegramUser {
                     id: 444,
                     is_bot: false,
@@ -290,6 +355,7 @@ mod tests {
         assert_eq!(inbound.chat_id, "333".to_string());
         assert_eq!(inbound.user_id, "444".to_string());
         assert_eq!(inbound.text, "ping".to_string());
+        assert!(inbound.is_direct_message);
     }
 
     #[test]
@@ -298,7 +364,10 @@ mod tests {
             update_id: 1,
             message: Some(TelegramMessage {
                 message_id: 2,
-                chat: TelegramChat { id: 3 },
+                chat: TelegramChat {
+                    id: 3,
+                    kind: "private".to_string(),
+                },
                 from: Some(TelegramUser {
                     id: 4,
                     is_bot: true,
