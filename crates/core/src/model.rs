@@ -82,6 +82,7 @@ impl FromStr for RuntimeMode {
 const MAX_SCOPE_KEY_LEN: usize = 256;
 const MAX_SCOPE_CHANNEL_LEN: usize = 32;
 const MAX_SCOPE_CHAT_LEN: usize = 220;
+const MAX_SCOPE_USER_LEN: usize = 220;
 const MAX_SESSION_ID_LEN: usize = 256;
 
 pub fn normalize_scope_key(raw: &str) -> Option<String> {
@@ -90,14 +91,25 @@ pub fn normalize_scope_key(raw: &str) -> Option<String> {
         return None;
     }
 
-    let (channel, chat_id) = scope_key.split_once(':')?;
-    let channel = channel.trim().to_ascii_lowercase();
-    let chat_id = chat_id.trim();
+    let mut parts = scope_key.split(':');
+    let channel = parts.next()?.trim().to_ascii_lowercase();
+    let chat_id = parts.next()?.trim();
+    let user_id = parts.next().map(str::trim);
+    if parts.next().is_some() {
+        return None;
+    }
+
     if !is_valid_scope_channel(&channel) || !is_valid_scope_chat(chat_id) {
         return None;
     }
 
-    Some(format!("{channel}:{chat_id}"))
+    match user_id {
+        Some(user_id) if is_valid_scope_user(user_id) => {
+            Some(format!("{channel}:{chat_id}:{user_id}"))
+        }
+        Some(_) => None,
+        None => Some(format!("{channel}:{chat_id}")),
+    }
 }
 
 pub fn normalize_session_id(raw: &str) -> Option<String> {
@@ -123,6 +135,12 @@ fn is_valid_scope_chat(chat_id: &str) -> bool {
     !chat_id.is_empty()
         && chat_id.len() <= MAX_SCOPE_CHAT_LEN
         && chat_id.chars().all(is_valid_id_char)
+}
+
+fn is_valid_scope_user(user_id: &str) -> bool {
+    !user_id.is_empty()
+        && user_id.len() <= MAX_SCOPE_USER_LEN
+        && user_id.chars().all(is_valid_id_char)
 }
 
 fn is_valid_id_char(ch: char) -> bool {
@@ -266,12 +284,12 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "new",
-        description: "start a fresh AI session for this chat",
+        description: "start a fresh AI session for your current scope",
         operator_only: false,
     },
     CommandSpec {
         name: "audit",
-        description: "show the recent audit log for this chat",
+        description: "show the recent audit log for your current scope",
         operator_only: true,
     },
     CommandSpec {
@@ -281,42 +299,42 @@ const COMMAND_SPECS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "provider_claude",
-        description: "switch this chat to claude",
+        description: "switch your current scope to claude",
         operator_only: true,
     },
     CommandSpec {
         name: "provider_codex",
-        description: "switch this chat to codex",
+        description: "switch your current scope to codex",
         operator_only: true,
     },
     CommandSpec {
         name: "provider_opencode",
-        description: "switch this chat to opencode",
+        description: "switch your current scope to opencode",
         operator_only: true,
     },
     CommandSpec {
         name: "mode_session",
-        description: "keep one provider session for this chat",
+        description: "keep one provider session for your current scope",
         operator_only: true,
     },
     CommandSpec {
         name: "mode_event",
-        description: "use stateless event mode for this chat",
+        description: "use stateless event mode for your current scope",
         operator_only: true,
     },
     CommandSpec {
         name: "session_reset",
-        description: "clear all cached provider sessions for this chat",
+        description: "clear all cached provider sessions for your current scope",
         operator_only: true,
     },
     CommandSpec {
         name: "pause",
-        description: "pause AI replies for this chat",
+        description: "pause AI replies for your current scope",
         operator_only: true,
     },
     CommandSpec {
         name: "resume",
-        description: "resume AI replies for this chat",
+        description: "resume AI replies for your current scope",
         operator_only: true,
     },
     CommandSpec {
@@ -496,7 +514,7 @@ mod tests {
     fn render_help_text_hides_operator_commands_for_regular_users() {
         let help = render_help_text(Channel::Telegram, false);
         assert!(help.contains("/help - show available commands"));
-        assert!(help.contains("/new - start a fresh AI session for this chat"));
+        assert!(help.contains("/new - start a fresh AI session for your current scope"));
         assert!(help.contains("/provider_list - show available providers"));
         assert!(!help.contains("/session_reset"));
     }
@@ -505,8 +523,10 @@ mod tests {
     fn render_help_text_includes_operator_commands_for_operators() {
         let help = render_help_text(Channel::Discord, true);
         assert!(help.contains("/ask <prompt> - ask without sending a plain message"));
-        assert!(help.contains("/provider_codex - switch this chat to codex"));
-        assert!(help.contains("/session_reset - clear all cached provider sessions for this chat"));
+        assert!(help.contains("/provider_codex - switch your current scope to codex"));
+        assert!(help.contains(
+            "/session_reset - clear all cached provider sessions for your current scope"
+        ));
     }
 
     #[test]
@@ -515,10 +535,15 @@ mod tests {
             normalize_scope_key("  Discord:12345 ").as_deref(),
             Some("discord:12345")
         );
+        assert_eq!(
+            normalize_scope_key("  Discord:12345:User_01 ").as_deref(),
+            Some("discord:12345:User_01")
+        );
         assert!(normalize_scope_key("").is_none());
         assert!(normalize_scope_key("discord").is_none());
         assert!(normalize_scope_key("discord:bad value").is_none());
         assert!(normalize_scope_key("discord:../../etc/passwd").is_none());
+        assert!(normalize_scope_key("discord:12345:user 01").is_none());
     }
 
     #[test]

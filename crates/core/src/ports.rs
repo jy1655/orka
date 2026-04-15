@@ -15,6 +15,7 @@ pub trait EventStore: Send + Sync {
         &self,
         action: &OutboundAction,
         runtime: Option<RuntimeLogContext>,
+        scope_key: Option<&str>,
     ) -> Result<()>;
     async fn is_paused(&self, scope_key: &str) -> Result<bool>;
     async fn set_paused(&self, scope_key: &str, paused: bool) -> Result<()>;

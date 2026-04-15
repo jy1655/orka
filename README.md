@@ -268,13 +268,13 @@ AI 응답이 Discord 메시지 길이 제한(2000자)을 초과하면:
 
 **`/status` 응답 예시:**
 ```
-status: active · scope=discord:123456789 · provider=claude · mode=session · session=active
+status: active · scope=discord:<chat_id>:<user_id> · provider=claude · mode=session · session=active
 ```
 
 ### 사용자 명령
 
 ```
-/new                    현재 채팅방의 AI 세션만 새로 시작합니다
+/new                    현재 사용자 scope의 AI 세션만 새로 시작합니다
                         (대화 맥락이 꼬였을 때 사용)
 ```
 
@@ -297,11 +297,11 @@ status: active · scope=discord:123456789 · provider=claude · mode=session · 
 /mode_session           위와 동일 (menu/slash command 별칭)
 /mode_event             위와 동일 (menu/slash command 별칭)
 
-/session reset          현재 채팅방의 모든 세션을 초기화합니다
+/session reset          현재 사용자 scope의 모든 세션을 초기화합니다
                         (대화 맥락이 꼬였을 때 사용)
 /session_reset          위와 동일 (menu/slash command 별칭)
 
-/pause                  현재 채팅방의 AI 응답을 일시 중지합니다
+/pause                  현재 사용자 scope의 AI 응답을 일시 중지합니다
 /resume                 일시 중지를 해제합니다
 
 /audit                  최근 10건의 이벤트 로그를 조회합니다
@@ -444,7 +444,7 @@ OPEN_ACCESS=false
 ALLOWLIST=discord:<discord_user_id>,telegram:<telegram_user_id>
 ```
 
-각 채널은 독립적인 scope로 운영됩니다. Discord에서 `/provider set codex`를 실행해도 Telegram 채팅에는 영향 없습니다.
+각 채널은 독립적인 scope로 운영되고, 공유 채널 안에서도 사용자별 scope가 분리됩니다. Discord에서 `/provider set codex`를 실행해도 Telegram 채팅에는 영향 없고, 같은 채널의 다른 사용자 세션도 바뀌지 않습니다.
 
 Discord/Telegram의 DM scope는 allowlist 사용자에게만 열립니다.
 
@@ -491,7 +491,7 @@ Discord/Telegram의 DM scope는 allowlist 사용자에게만 열립니다.
 |---|---|---|
 | `MAX_CONCURRENT_TASKS` | `8` | 동시에 처리할 수 있는 최대 태스크 수. 서버 리소스에 맞게 조절하세요. |
 | `RATE_LIMIT_WINDOW_SECS` | `60` | Rate limit 윈도우 크기 (초). |
-| `RATE_LIMIT_MAX_REQUESTS` | `0` | 윈도우 내 scope(채팅방)당 최대 요청 수. `0`이면 제한 없음. 예: `10`이면 60초간 같은 채팅방에서 최대 10건. |
+| `RATE_LIMIT_MAX_REQUESTS` | `0` | 윈도우 내 scope(채널+채팅방+사용자)당 최대 요청 수. `0`이면 제한 없음. 예: `10`이면 60초간 같은 사용자 scope에서 최대 10건. |
 
 ### Discord UX 옵션
 
@@ -601,16 +601,17 @@ orka_provider_requests_total{provider="codex",mode="event",status="error"} 2
 ### 동시성 제어
 
 - **글로벌 제한**: `MAX_CONCURRENT_TASKS`개를 초과하는 요청은 대기합니다
-- **Scope별 제한**: 같은 채팅방에서 동시에 2건을 보내면, 먼저 온 것이 처리되고 나중 것은 "busy" 응답을 받습니다
+- **Scope별 제한**: 같은 사용자 scope에서 동시에 2건을 보내면, 먼저 온 것이 처리되고 나중 것은 "busy" 응답을 받습니다
+- 공유 채널에서는 사용자마다 scope가 분리되므로, 한 사용자의 session/event 상태가 다른 사용자의 대화에 섞이지 않습니다
 - 사용하지 않는 scope의 잠금은 100건 이벤트마다 자동 정리됩니다
 
 ### Rate Limiting
 
-scope(채널+채팅방) 단위의 슬라이딩 윈도우 방식입니다:
+scope(채널+채팅방+사용자) 단위의 슬라이딩 윈도우 방식입니다:
 
 ```env
 RATE_LIMIT_WINDOW_SECS=60      # 60초 윈도우
-RATE_LIMIT_MAX_REQUESTS=10     # 윈도우당 10건 (0이면 제한 없음)
+RATE_LIMIT_MAX_REQUESTS=10     # 사용자 scope당 10건 (0이면 제한 없음)
 ```
 
 제한에 걸리면 사용자에게 "Rate limited. Please wait before sending more requests." 메시지가 전송됩니다.

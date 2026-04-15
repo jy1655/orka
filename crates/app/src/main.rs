@@ -276,7 +276,7 @@ async fn run_main_loop(
                 if !rl.check(&scope_key) {
                   warn!(scope_key = %scope_key, "rate limited");
                   let limited = event.reply("Rate limited. Please wait before sending more requests.".to_string());
-                  if let Err(err) = pipeline.dispatch_outbound(&limited).await {
+                  if let Err(err) = pipeline.dispatch_outbound(&limited, Some(&scope_key)).await {
                     error!("failed to send rate limit response: {err}");
                   }
                   continue;
@@ -319,7 +319,7 @@ async fn run_main_loop(
                     let busy = event.reply(
                       "This scope is currently processing a request. Please wait and try again.".to_string(),
                     );
-                    if let Err(err) = task_pipeline.dispatch_outbound(&busy).await {
+                    if let Err(err) = task_pipeline.dispatch_outbound(&busy, Some(&scope_key)).await {
                       error!("failed to send busy response: {err}");
                     }
                     return;
