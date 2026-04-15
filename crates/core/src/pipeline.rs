@@ -76,8 +76,12 @@ impl GatewayPipeline {
         &self.outbound
     }
 
-    pub async fn dispatch_outbound(&self, action: &OutboundAction) -> Result<()> {
-        self.dispatch(action.clone(), None).await
+    pub async fn dispatch_outbound(
+        &self,
+        action: &OutboundAction,
+        scope_key: Option<&str>,
+    ) -> Result<()> {
+        self.dispatch(action.clone(), None, scope_key).await
     }
 
     pub fn metrics_snapshot(&self) -> GatewayMetricsSnapshot {
@@ -127,6 +131,7 @@ impl GatewayPipeline {
             self.dispatch(
                 event.reply("direct messages are restricted to allowlisted operators.".to_string()),
                 None,
+                Some(&scope_key),
             )
             .await?;
             return Ok(());
@@ -139,7 +144,7 @@ impl GatewayPipeline {
         if self.store.is_paused(&scope_key).await? {
             let paused =
                 event.reply("This session is paused. Use /resume (operator only).".to_string());
-            self.dispatch(paused, None).await?;
+            self.dispatch(paused, None, Some(&scope_key)).await?;
             return Ok(());
         }
 
@@ -202,6 +207,7 @@ impl GatewayPipeline {
                                     latency_ms: elapsed_ms(invoke_started),
                                     status: ProviderStatus::Error,
                                 }),
+                                Some(&scope_key),
                             )
                             .await?;
                             self.with_metrics_mut(|metrics| {
@@ -222,6 +228,7 @@ impl GatewayPipeline {
                             latency_ms: elapsed_ms(invoke_started),
                             status: ProviderStatus::Error,
                         }),
+                        Some(&scope_key),
                     )
                     .await?;
                     self.with_metrics_mut(|metrics| {
@@ -261,6 +268,7 @@ impl GatewayPipeline {
                     latency_ms: elapsed_ms(invoke_started),
                     status: ProviderStatus::Success,
                 }),
+                Some(&scope_key),
             )
             .await?;
         }
@@ -274,10 +282,10 @@ impl GatewayPipeline {
         scope_key: &str,
     ) -> Result<()> {
         match command {
-            Command::Help => self.cmd_help(event).await?,
+            Command::Help => self.cmd_help(event, scope_key).await?,
             Command::Status => self.cmd_status(event, scope_key).await?,
             Command::NewSession => self.cmd_new_session(event, scope_key).await?,
-            Command::EnvVars => self.cmd_envvars(event).await?,
+            Command::EnvVars => self.cmd_envvars(event, scope_key).await?,
             Command::ProviderList => self.cmd_provider_list(event, scope_key).await?,
             Command::ProviderSet(provider) => {
                 self.cmd_provider_set(event, scope_key, provider).await?
@@ -292,13 +300,14 @@ impl GatewayPipeline {
         Ok(())
     }
 
-    async fn cmd_help(&self, event: &InboundEvent) -> Result<()> {
+    async fn cmd_help(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
         let is_operator = self
             .policy
             .is_operator(event.channel, &event.user_id, &event.claims);
         self.dispatch(
             event.reply(render_help_text(event.channel, is_operator)),
             None,
+            Some(scope_key),
         )
         .await
     }
@@ -325,16 +334,21 @@ impl GatewayPipeline {
             preference.provider.as_str(),
             preference.mode.as_str()
         );
-        self.dispatch(event.reply(text), None).await
+        self.dispatch(event.reply(text), None, Some(scope_key))
+            .await
     }
 
     async fn cmd_new_session(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
         self.store.clear_provider_session(scope_key).await?;
-        self.dispatch(event.reply(format!("new session: {scope_key}")), None)
-            .await
+        self.dispatch(
+            event.reply(format!("new session: {scope_key}")),
+            None,
+            Some(scope_key),
+        )
+        .await
     }
 
-    async fn cmd_envvars(&self, event: &InboundEvent) -> Result<()> {
+    async fn cmd_envvars(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
         if !self.require_operator(event).await? {
             return Ok(());
         }
@@ -344,7 +358,8 @@ impl GatewayPipeline {
         } else {
             format!("envvars\n{}", self.operator_env_report)
         };
-        self.dispatch(event.reply(report), None).await
+        self.dispatch(event.reply(report), None, Some(scope_key))
+            .await
     }
 
     async fn cmd_provider_list(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
@@ -356,6 +371,7 @@ impl GatewayPipeline {
                 preference.mode.as_str()
             )),
             None,
+            Some(scope_key),
         )
         .await
     }
@@ -387,6 +403,7 @@ impl GatewayPipeline {
                 provider.as_str()
             )),
             None,
+            Some(scope_key),
         )
         .await
     }
@@ -415,6 +432,7 @@ impl GatewayPipeline {
         self.dispatch(
             event.reply(format!("mode set: {} · scope={scope_key}", mode.as_str())),
             None,
+            Some(scope_key),
         )
         .await
     }
@@ -425,8 +443,12 @@ impl GatewayPipeline {
         }
 
         self.store.clear_provider_session(scope_key).await?;
-        self.dispatch(event.reply(format!("session reset: {scope_key}")), None)
-            .await
+        self.dispatch(
+            event.reply(format!("session reset: {scope_key}")),
+            None,
+            Some(scope_key),
+        )
+        .await
     }
 
     async fn cmd_pause(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
@@ -435,8 +457,12 @@ impl GatewayPipeline {
         }
 
         self.store.set_paused(scope_key, true).await?;
-        self.dispatch(event.reply(format!("paused: {scope_key}")), None)
-            .await
+        self.dispatch(
+            event.reply(format!("paused: {scope_key}")),
+            None,
+            Some(scope_key),
+        )
+        .await
     }
 
     async fn cmd_resume(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
@@ -445,8 +471,12 @@ impl GatewayPipeline {
         }
 
         self.store.set_paused(scope_key, false).await?;
-        self.dispatch(event.reply(format!("resumed: {scope_key}")), None)
-            .await
+        self.dispatch(
+            event.reply(format!("resumed: {scope_key}")),
+            None,
+            Some(scope_key),
+        )
+        .await
     }
 
     async fn cmd_audit(&self, event: &InboundEvent, scope_key: &str, count: usize) -> Result<()> {
@@ -456,8 +486,12 @@ impl GatewayPipeline {
 
         let entries = self.store.query_recent_events(scope_key, count).await?;
         if entries.is_empty() {
-            self.dispatch(event.reply("audit: no recent events".to_string()), None)
-                .await?;
+            self.dispatch(
+                event.reply("audit: no recent events".to_string()),
+                None,
+                Some(scope_key),
+            )
+            .await?;
             return Ok(());
         }
 
@@ -470,7 +504,8 @@ impl GatewayPipeline {
             ));
         }
         let text = format!("audit ({} entries):\n{}", entries.len(), lines.join("\n"));
-        self.dispatch(event.reply(text), None).await
+        self.dispatch(event.reply(text), None, Some(scope_key))
+            .await
     }
 
     async fn require_operator(&self, event: &InboundEvent) -> Result<bool> {
@@ -480,9 +515,11 @@ impl GatewayPipeline {
         {
             return Ok(true);
         }
+        let scope_key = normalize_scope_key(&session_key_for_event(event));
         self.dispatch(
             event.reply("unauthorized: operator only command".to_string()),
             None,
+            scope_key.as_deref(),
         )
         .await?;
         Ok(false)
@@ -553,8 +590,11 @@ impl GatewayPipeline {
         &self,
         action: OutboundAction,
         runtime: Option<RuntimeLogContext>,
+        scope_key: Option<&str>,
     ) -> Result<()> {
-        self.store.save_outbound(&action, runtime).await?;
+        self.store
+            .save_outbound(&action, runtime, scope_key)
+            .await?;
         self.outbound.send(&action).await?;
         self.with_metrics_mut(|metrics| {
             metrics.outbound_total += 1;
@@ -647,6 +687,7 @@ mod tests {
             &self,
             action: &OutboundAction,
             _runtime: Option<RuntimeLogContext>,
+            _scope_key: Option<&str>,
         ) -> Result<()> {
             self.outbound.lock().await.push(action.clone());
             Ok(())
@@ -737,12 +778,13 @@ mod tests {
 
         async fn query_recent_events(
             &self,
-            _scope_key: &str,
+            scope_key: &str,
             limit: usize,
         ) -> Result<Vec<AuditEntry>> {
             let inbound = self.inbound.lock().await;
             let entries: Vec<AuditEntry> = inbound
                 .iter()
+                .filter(|event| session_key_for_event(event) == scope_key)
                 .rev()
                 .take(limit)
                 .map(|event| AuditEntry {
@@ -933,6 +975,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_mode_does_not_reuse_provider_session_across_users_in_same_chat() -> Result<()>
+    {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store,
+            runtime.clone(),
+            outbound,
+            AccessPolicy::new(Vec::<String>::new(), true),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Session,
+            },
+            false,
+            String::new(),
+        );
+
+        pipeline
+            .handle_event(event_with_text("evt-user-1", "user-1", "hello from user 1"))
+            .await?;
+        pipeline
+            .handle_event(event_with_text("evt-user-2", "user-2", "hello from user 2"))
+            .await?;
+
+        let last = runtime
+            .last_request
+            .lock()
+            .await
+            .clone()
+            .expect("runtime request exists");
+        assert_eq!(last.mode, RuntimeMode::Session);
+        assert!(last.session_id.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn provider_set_requires_operator() -> Result<()> {
         let store = Arc::new(MemoryStore::default());
         let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
@@ -1000,6 +1079,45 @@ mod tests {
         let actions = outbound.actions.lock().await;
         assert_eq!(actions.len(), 1);
         assert!(actions[0].text.contains("provider set: codex"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn provider_preference_is_isolated_per_user_in_same_chat() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(None));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store,
+            runtime.clone(),
+            outbound,
+            AccessPolicy::new(vec!["discord:user-1".to_string()], false),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Event,
+            },
+            false,
+            String::new(),
+        );
+
+        pipeline
+            .handle_event(event_with_text(
+                "cmd-user-1",
+                "user-1",
+                "/provider set codex",
+            ))
+            .await?;
+        pipeline
+            .handle_event(event_with_text("evt-user-2", "user-2", "hello from user 2"))
+            .await?;
+
+        let last = runtime
+            .last_request
+            .lock()
+            .await
+            .clone()
+            .expect("runtime request exists");
+        assert_eq!(last.provider, ProviderKind::Claude);
         Ok(())
     }
 
@@ -1085,7 +1203,10 @@ mod tests {
 
         let actions = outbound.actions.lock().await;
         assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].text, "new session: discord:chat-1".to_string());
+        assert_eq!(
+            actions[0].text,
+            "new session: discord:chat-1:user-1".to_string()
+        );
         Ok(())
     }
 
@@ -1116,7 +1237,7 @@ mod tests {
         assert!(actions[0].text.contains("/help - show available commands"));
         assert!(actions[0]
             .text
-            .contains("/new - start a fresh AI session for this chat"));
+            .contains("/new - start a fresh AI session for your current scope"));
         assert!(!actions[0].text.contains("/session_reset"));
         Ok(())
     }

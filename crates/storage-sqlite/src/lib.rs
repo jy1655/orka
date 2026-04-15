@@ -14,7 +14,10 @@ use orka_core::model::{
     AuditEntry, OutboundAction, ProviderKind, RuntimeLogContext, RuntimeMode, RuntimePreference,
 };
 use orka_core::ports::EventStore;
-use orka_core::{model::InboundEvent, session::session_key_for_event};
+use orka_core::{
+    model::InboundEvent,
+    session::{chat_scope_key, session_key_for_event},
+};
 
 #[derive(Clone)]
 pub struct SqliteStore {
@@ -90,7 +93,7 @@ impl EventStore for SqliteStore {
        VALUES(?, ?, ?, 'active', ?)
        ON CONFLICT(id) DO UPDATE SET last_seen_at=excluded.last_seen_at",
         )
-        .bind(scope)
+        .bind(&scope)
         .bind(event.channel.as_str())
         .bind(&event.chat_id)
         .bind(now)
@@ -99,10 +102,11 @@ impl EventStore for SqliteStore {
 
         query::<sqlx_sqlite::Sqlite>(
             "INSERT OR IGNORE INTO event_log
-       (idempotency_key, channel, direction, chat_id, user_id, payload_text, created_at)
-       VALUES (?, ?, 'inbound', ?, ?, ?, ?)",
+       (idempotency_key, scope_key, channel, direction, chat_id, user_id, payload_text, created_at)
+       VALUES (?, ?, ?, 'inbound', ?, ?, ?, ?)",
         )
         .bind(&event.idempotency_key)
+        .bind(&scope)
         .bind(event.channel.as_str())
         .bind(&event.chat_id)
         .bind(&event.user_id)
@@ -117,12 +121,17 @@ impl EventStore for SqliteStore {
         &self,
         action: &OutboundAction,
         runtime: Option<RuntimeLogContext>,
+        scope_key: Option<&str>,
     ) -> Result<()> {
+        let scope_key = scope_key
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| chat_scope_key(action.channel, &action.chat_id));
         query::<sqlx_sqlite::Sqlite>(
             "INSERT INTO event_log
-       (idempotency_key, channel, direction, chat_id, user_id, payload_text, created_at, provider_kind, runtime_mode, provider_latency_ms, provider_status)
-       VALUES (NULL, ?, 'outbound', ?, NULL, ?, ?, ?, ?, ?, ?)",
+       (idempotency_key, scope_key, channel, direction, chat_id, user_id, payload_text, created_at, provider_kind, runtime_mode, provider_latency_ms, provider_status)
+       VALUES (NULL, ?, ?, 'outbound', ?, NULL, ?, ?, ?, ?, ?, ?)",
         )
+        .bind(scope_key)
         .bind(action.channel.as_str())
         .bind(&action.chat_id)
         .bind(self.payload_for_storage(&action.text))
@@ -273,8 +282,7 @@ impl EventStore for SqliteStore {
         let rows = query::<sqlx_sqlite::Sqlite>(
             "SELECT e.direction, e.channel, e.chat_id, e.user_id, e.payload_text, e.created_at
              FROM event_log e
-             JOIN sessions s ON s.id = ?
-             WHERE e.channel = s.channel AND e.chat_id = s.chat_id
+             WHERE e.scope_key = ?
              ORDER BY e.id DESC
              LIMIT ?",
         )
@@ -397,6 +405,7 @@ mod tests {
                     latency_ms: 321,
                     status: ProviderStatus::Success,
                 }),
+                Some("discord:123:user-1"),
             )
             .await?;
 
@@ -506,8 +515,8 @@ mod tests {
                 idempotency_key: "discord-1".to_string(),
                 channel: Channel::Discord,
                 chat_id: "42".to_string(),
-                user_id: "discord-user".to_string(),
-                text: "discord-only".to_string(),
+                user_id: "discord-user-a".to_string(),
+                text: "discord-user-a-only".to_string(),
                 received_at: Utc::now(),
                 is_direct_message: false,
                 reply_token: None,
@@ -517,11 +526,11 @@ mod tests {
             .await?;
         store
             .save_inbound(&InboundEvent {
-                idempotency_key: "telegram-1".to_string(),
-                channel: Channel::Telegram,
+                idempotency_key: "discord-2".to_string(),
+                channel: Channel::Discord,
                 chat_id: "42".to_string(),
-                user_id: "telegram-user".to_string(),
-                text: "telegram-only".to_string(),
+                user_id: "discord-user-b".to_string(),
+                text: "discord-user-b-only".to_string(),
                 received_at: Utc::now(),
                 is_direct_message: false,
                 reply_token: None,
@@ -530,9 +539,12 @@ mod tests {
             })
             .await?;
 
-        let entries = store.query_recent_events("discord:42", 10).await?;
+        let entries = store
+            .query_recent_events("discord:42:discord-user-a", 10)
+            .await?;
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].channel, "discord".to_string());
+        assert_eq!(entries[0].user_id.as_deref(), Some("discord-user-a"));
         assert!(entries[0].text.starts_with("[redacted "));
 
         cleanup_sqlite_files(&path);

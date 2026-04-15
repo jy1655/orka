@@ -358,6 +358,7 @@ mod tests {
             &self,
             _action: &OutboundAction,
             _runtime: Option<RuntimeLogContext>,
+            _scope_key: Option<&str>,
         ) -> Result<()> {
             Ok(())
         }
