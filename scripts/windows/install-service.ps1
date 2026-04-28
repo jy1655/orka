@@ -13,6 +13,8 @@
     Working directory for the service. Defaults to the binary's parent directory.
 .PARAMETER EnvFile
     Path to .env file. Variables are loaded into the service environment.
+.PARAMETER RestartDelayMs
+    Delay before NSSM restarts the app after an unexpected exit. Default: 5000.
 .PARAMETER Uninstall
     Remove the service instead of installing.
 #>
@@ -21,6 +23,7 @@ param(
     [string]$BinaryPath,
     [string]$WorkDir,
     [string]$EnvFile,
+    [int]$RestartDelayMs = 5000,
     [switch]$Uninstall
 )
 
@@ -68,6 +71,7 @@ Write-Host "Installing service '$ServiceName'..." -ForegroundColor Green
 Write-Host "  Binary : $BinaryPath"
 Write-Host "  WorkDir: $WorkDir"
 Write-Host "  EnvFile: $EnvFile"
+Write-Host "  Restart: on exit (${RestartDelayMs}ms delay)"
 
 # Install service
 nssm install $ServiceName $BinaryPath
@@ -76,6 +80,8 @@ nssm set $ServiceName DisplayName "Orka AI Gateway"
 nssm set $ServiceName Description "Discord/Telegram AI CLI gateway"
 nssm set $ServiceName Start SERVICE_AUTO_START
 nssm set $ServiceName ObjectName LocalSystem
+nssm set $ServiceName AppExit Default Restart
+nssm set $ServiceName AppRestartDelay $RestartDelayMs
 
 # Stdout/stderr logging
 $LogDir = Join-Path $WorkDir 'logs'

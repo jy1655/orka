@@ -11,7 +11,7 @@ use std::env;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use anyhow::{Error, Result};
+use anyhow::{anyhow, Error, Result};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::{Mutex, Semaphore};
@@ -103,7 +103,7 @@ async fn run_gateway(cfg: AppConfig) -> Result<()> {
     )));
     let mut inflight = JoinSet::new();
 
-    run_main_loop(
+    let run_result = run_main_loop(
         &cfg,
         pipeline.clone(),
         &health_state,
@@ -116,16 +116,25 @@ async fn run_gateway(cfg: AppConfig) -> Result<()> {
         rate_limiter,
         &mut inflight,
     )
-    .await?;
+    .await;
 
-    abort_tasks(&mut adapter_tasks);
+    abort_adapter_tasks(&mut adapter_tasks);
     health_task.abort();
-    info!("gateway stopped");
 
-    Ok(())
+    match run_result {
+        Ok(()) => {
+            info!("gateway stopped");
+            Ok(())
+        }
+        Err(err) => {
+            error!("gateway stopped with error: {err:#}");
+            Err(err)
+        }
+    }
 }
 
-type AdapterTask = JoinHandle<()>;
+type AdapterTaskResult = (&'static str, Result<()>);
+type AdapterTasks = JoinSet<AdapterTaskResult>;
 type HealthTask = JoinHandle<Result<()>>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,29 +204,21 @@ fn build_outbound(cfg: &AppConfig) -> Arc<dyn OutboundSender> {
     Arc::new(multiplex)
 }
 
-fn spawn_adapters(cfg: &AppConfig, inbound_tx: &mpsc::Sender<InboundEvent>) -> Vec<AdapterTask> {
-    let mut tasks = Vec::new();
+fn spawn_adapters(cfg: &AppConfig, inbound_tx: &mpsc::Sender<InboundEvent>) -> AdapterTasks {
+    let mut tasks = JoinSet::new();
 
     if cfg.discord_bot_token.trim().is_empty() {
         warn!("discord adapter is disabled");
     } else {
         let discord = DiscordAdapter::new(cfg.discord_bot_token.clone(), inbound_tx.clone());
-        tasks.push(tokio::spawn(async move {
-            if let Err(err) = discord.run().await {
-                error!("discord adapter stopped with error: {err}");
-            }
-        }));
+        tasks.spawn(async move { ("discord", discord.run().await) });
     }
 
     if cfg.telegram_bot_token.trim().is_empty() {
         warn!("telegram adapter is disabled");
     } else {
         let telegram = TelegramAdapter::new(cfg.telegram_bot_token.clone(), inbound_tx.clone());
-        tasks.push(tokio::spawn(async move {
-            if let Err(err) = telegram.run().await {
-                error!("telegram adapter stopped with error: {err}");
-            }
-        }));
+        tasks.spawn(async move { ("telegram", telegram.run().await) });
     }
 
     tasks
@@ -229,7 +230,7 @@ async fn run_main_loop(
     pipeline: Arc<GatewayPipeline>,
     health_state: &HealthState,
     health_task: &mut HealthTask,
-    adapter_tasks: &mut Vec<AdapterTask>,
+    adapter_tasks: &mut AdapterTasks,
     inbound_tx: &mut Option<mpsc::Sender<InboundEvent>>,
     inbound_rx: &mut mpsc::Receiver<InboundEvent>,
     concurrency: Arc<Semaphore>,
@@ -247,7 +248,7 @@ async fn run_main_loop(
               drain_timeout_ms = cfg.shutdown_drain_timeout_ms,
               "shutdown signal received; stopping adapters and draining"
             );
-            abort_tasks(adapter_tasks);
+            abort_adapter_tasks(adapter_tasks);
             let _ = inbound_tx.take();
 
             // Wait for all in-flight tasks to complete before draining the queue.
@@ -264,6 +265,18 @@ async fn run_main_loop(
               Err(err) => return Err(err.into()),
             }
             break;
+          }
+          adapter_result = adapter_tasks.join_next(), if !adapter_tasks.is_empty() => {
+            health_state.ready.store(false, Ordering::Relaxed);
+            let _ = inbound_tx.take();
+            inflight.abort_all();
+            abort_adapter_tasks(adapter_tasks);
+
+            match adapter_result {
+              Some(Ok((name, result))) => return Err(unexpected_adapter_exit(name, result)),
+              Some(Err(err)) => return Err(anyhow!("adapter task join failed: {err}")),
+              None => return Err(anyhow!("all adapter tasks stopped unexpectedly")),
+            }
           }
           // Reap completed tasks to keep the JoinSet from growing.
           Some(_) = inflight.join_next(), if !inflight.is_empty() => {}
@@ -390,6 +403,13 @@ async fn run_main_loop(
     Ok(())
 }
 
+fn unexpected_adapter_exit(name: &str, result: Result<()>) -> Error {
+    match result {
+        Ok(()) => anyhow!("{name} adapter stopped unexpectedly"),
+        Err(err) => err.context(format!("{name} adapter stopped unexpectedly")),
+    }
+}
+
 async fn evict_unused_scope_locks(scope_locks: &Arc<Mutex<HashMap<String, Arc<Semaphore>>>>) {
     let mut locks = scope_locks.lock().await;
     let before = locks.len();
@@ -449,10 +469,8 @@ async fn await_inflight(inflight: &mut JoinSet<()>, timeout_ms: u64) {
     }
 }
 
-fn abort_tasks(tasks: &mut Vec<AdapterTask>) {
-    for task in tasks.drain(..) {
-        task.abort();
-    }
+fn abort_adapter_tasks(tasks: &mut AdapterTasks) {
+    tasks.abort_all();
 }
 
 async fn drain_queued_events(
@@ -499,9 +517,10 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::anyhow;
     use chrono::Utc;
 
-    use super::{heartbeat_mode_for_event, HeartbeatMode};
+    use super::{heartbeat_mode_for_event, unexpected_adapter_exit, HeartbeatMode};
     use orka_core::model::{Channel, InboundEvent};
 
     fn inbound_event(channel: Channel, reply_token: Option<&str>) -> InboundEvent {
@@ -538,5 +557,19 @@ mod tests {
     fn heartbeat_mode_stays_disabled_for_plain_telegram_messages() {
         let event = inbound_event(Channel::Telegram, None);
         assert_eq!(heartbeat_mode_for_event(&event), HeartbeatMode::None);
+    }
+
+    #[test]
+    fn unexpected_adapter_exit_marks_clean_stop_as_failure() {
+        let err = unexpected_adapter_exit("discord", Ok(()));
+        assert_eq!(err.to_string(), "discord adapter stopped unexpectedly");
+    }
+
+    #[test]
+    fn unexpected_adapter_exit_preserves_source_error_context() {
+        let err = unexpected_adapter_exit("telegram", Err(anyhow!("boom")));
+        assert_eq!(err.to_string(), "telegram adapter stopped unexpectedly");
+        let chain = err.chain().map(|item| item.to_string()).collect::<Vec<_>>();
+        assert!(chain.iter().any(|item| item == "boom"));
     }
 }
