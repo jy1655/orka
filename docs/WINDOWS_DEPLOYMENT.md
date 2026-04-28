@@ -115,9 +115,12 @@ CODEX_SESSION_ARGS=exec --json --skip-git-repo-check
 
 ```powershell
 choco install nssm
-.\scripts\windows\install-service.ps1
+.\scripts\windows\install-service.ps1 -BinaryPath C:\Users\you\orka\orka-app.exe
 nssm start OrkGateway
 ```
+
+크로스 컴파일 후 `orka-app.exe`를 `C:\Users\you\orka\`로 복사한 배포 레이아웃에서는 위처럼 `-BinaryPath`를 명시하세요.
+스크립트의 기본값은 로컬 Windows 네이티브 빌드 산출물인 `target\release\orka-app.exe`를 가정합니다.
 
 ### 방법 2: register-startup.ps1 (로그인 세션용, 관리자 불필요)
 
