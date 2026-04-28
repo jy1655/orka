@@ -400,7 +400,7 @@ impl Command {
             "/resume" if tokens.next().is_none() => Some(Self::Resume),
             "/audit" => {
                 let count = match tokens.next() {
-                    Some(n) => n.parse::<usize>().ok()?.min(MAX_AUDIT_COUNT).max(1),
+                    Some(n) => (n.parse::<usize>().ok()?).clamp(1, MAX_AUDIT_COUNT),
                     None => 10,
                 };
                 if tokens.next().is_some() {
