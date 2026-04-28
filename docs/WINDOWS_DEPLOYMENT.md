@@ -106,9 +106,20 @@ CODEX_SESSION_ARGS=exec --json --skip-git-repo-check
 
 > 기본값에서는 Codex의 sandbox/approval 정책을 약화하지 않습니다. 운영 환경에서는 우회 플래그를 문서화된 기본값으로 배포하지 마세요.
 
-## Auto-start (시작프로그램 등록)
+## Auto-start / Supervision
 
-### 방법 1: register-startup.ps1 (권장, 관리자 불필요)
+### 방법 1: NSSM Windows 서비스 (권장, 상시 운용)
+
+로그인 없이도 부팅 시 자동 실행이 필요하거나, 미니 PC를 무인으로 계속 돌릴 경우 이 방법을 사용하세요.
+`install-service.ps1`는 `orka-app.exe`가 비정상 종료되면 NSSM이 다시 시작하도록 기본 재시작 정책을 설정합니다.
+
+```powershell
+choco install nssm
+.\scripts\windows\install-service.ps1
+nssm start OrkGateway
+```
+
+### 방법 2: register-startup.ps1 (로그인 세션용, 관리자 불필요)
 
 ```powershell
 # 등록
@@ -118,17 +129,8 @@ pwsh -ExecutionPolicy Bypass -File C:\Users\you\orka\register-startup.ps1
 pwsh -ExecutionPolicy Bypass -File C:\Users\you\orka\register-startup.ps1 -Unregister
 ```
 
-사용자 로그인 시 자동으로 `start-orka.ps1`이 실행됩니다.
-
-### 방법 2: NSSM Windows 서비스
-
-로그인 없이도 부팅 시 자동 실행이 필요한 경우:
-
-```powershell
-choco install nssm
-.\scripts\windows\install-service.ps1
-nssm start OrkGateway
-```
+사용자 로그인 시 자동으로 `start-orka.ps1`이 한 번 실행됩니다.
+이 방식은 편의용이며, 프로세스가 종료된 뒤 자동 복구를 보장하지 않습니다.
 
 ## Remote Deployment via SSH
 
@@ -145,7 +147,7 @@ ssh user@windows-pc "powershell -ExecutionPolicy Bypass -File C:\Users\you\orka\
 |------|------|------|
 | PATH에 새 도구가 안 보임 | MSI 설치 후 현재 세션에 반영 안 됨 | `$env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' + [Environment]::GetEnvironmentVariable('Path','User')` |
 | PowerShell 스크립트 실행 거부 | ExecutionPolicy 기본값이 Restricted | `-ExecutionPolicy Bypass` 플래그 사용 |
-| SSH 세션 종료 시 프로세스 죽음 | SSH 프로세스 트리가 함께 종료 | `register-startup.ps1`로 시작프로그램 등록 후 로그인으로 시작, 또는 NSSM 서비스 사용 |
+| SSH 세션 종료 시 프로세스 죽음 | SSH 프로세스 트리가 함께 종료 | 상시 운용이면 NSSM 서비스 사용. 로그인 세션 기반이면 `register-startup.ps1` 등록 후 로그인으로 시작 |
 | Tailscale IP로 SSH 불가 | 재부팅 후 Tailscale 서비스 시작 지연 | 부팅 후 1-2분 대기, 또는 로컬 IP 사용 |
 
 ## Verification
