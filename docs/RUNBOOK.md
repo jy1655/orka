@@ -186,3 +186,20 @@ sqlite3 data/orka-gateway.db \
 - provider 전환/모드 전환 시각과 사유 기록
 - 장애 테스트는 소규모 채널에서 먼저 수행
 - 변경 후 최소 1회 smoke test(Discord/Telegram 중 사용 채널) 수행
+
+## 10. CI 게이트
+
+`main` 대상으로 들어오는 `push`와 `pull_request`에는 GitHub Actions CI가 실행된다.
+
+필수 게이트:
+
+- `cargo build --workspace --locked`
+- `cargo test --workspace --locked`
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`
+- `cargo fmt --all -- --check`
+
+참고 게이트:
+
+- `cargo audit`
+
+현재 `cargo audit`는 참고용으로만 실행된다. `#8`의 `rand 0.8.5` upstream tracking warning이 남아 있기 때문에, 취약점 경고 정책이 정리되기 전까지는 PR 차단 게이트로 승격하지 않는다.
