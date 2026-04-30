@@ -121,6 +121,9 @@ nssm start OrkGateway
 
 크로스 컴파일 후 `orka-app.exe`를 `C:\Users\you\orka\`로 복사한 배포 레이아웃에서는 위처럼 `-BinaryPath`를 명시하세요.
 스크립트의 기본값은 로컬 Windows 네이티브 빌드 산출물인 `target\release\orka-app.exe`를 가정합니다.
+서비스는 `LocalSystem`으로 등록되지만, `install-service.ps1`는 배포 경로가 `C:\Users\...` 아래에 있으면 해당 사용자 프로필을 자동으로 서비스 환경(`USERPROFILE/HOME/APPDATA/LOCALAPPDATA`)에 주입합니다.
+이렇게 해야 `codex-wrapper.cmd`와 사용자 프로필 기반 Codex 인증/설정이 서비스 실행에서도 동일하게 보입니다.
+배포 경로와 실제 Codex 프로필 루트가 다르면 `-ProfileRoot C:\Users\actual-user`를 함께 넘기세요.
 
 ### 방법 2: register-startup.ps1 (로그인 세션용, 관리자 불필요)
 
@@ -152,6 +155,7 @@ ssh user@windows-pc "powershell -ExecutionPolicy Bypass -File C:\Users\you\orka\
 | PowerShell 스크립트 실행 거부 | ExecutionPolicy 기본값이 Restricted | `-ExecutionPolicy Bypass` 플래그 사용 |
 | SSH 세션 종료 시 프로세스 죽음 | SSH 프로세스 트리가 함께 종료 | 상시 운용이면 NSSM 서비스 사용. 로그인 세션 기반이면 `register-startup.ps1` 등록 후 로그인으로 시작 |
 | Tailscale IP로 SSH 불가 | 재부팅 후 Tailscale 서비스 시작 지연 | 부팅 후 1-2분 대기, 또는 로컬 IP 사용 |
+| Discord/Telegram에서 즉시 `runtime error: request failed...` | Windows 서비스가 `LocalSystem`으로 떠서 사용자 프로필 기반 Codex/npm 인증을 못 봄 | `install-service.ps1`로 서비스를 다시 설치하거나 `-ProfileRoot C:\Users\you`를 지정해 `USERPROFILE/HOME/APPDATA/LOCALAPPDATA`를 서비스 환경에 주입 |
 
 ## Verification
 

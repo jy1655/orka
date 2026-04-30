@@ -13,6 +13,10 @@
     Working directory for the service. Defaults to the binary's parent directory.
 .PARAMETER EnvFile
     Path to .env file. Variables are loaded into the service environment.
+.PARAMETER ProfileRoot
+    User profile root to expose to the service when running under LocalSystem
+    (for example C:\Users\you). When omitted, the script infers it from the
+    deployment path if possible.
 .PARAMETER RestartDelayMs
     Delay before NSSM restarts the app after an unexpected exit. Default: 5000.
 .PARAMETER Uninstall
@@ -23,11 +27,32 @@ param(
     [string]$BinaryPath,
     [string]$WorkDir,
     [string]$EnvFile,
+    [string]$ProfileRoot,
     [int]$RestartDelayMs = 5000,
     [switch]$Uninstall
 )
 
 $ErrorActionPreference = 'Stop'
+
+function Get-InferredProfileRoot {
+    param([string]$Path)
+
+    if (-not $Path) {
+        return $null
+    }
+
+    try {
+        $fullPath = [System.IO.Path]::GetFullPath($Path)
+    } catch {
+        return $null
+    }
+
+    if ($fullPath -match '^[A-Za-z]:\\Users\\[^\\]+') {
+        return $matches[0]
+    }
+
+    return $null
+}
 
 # Check NSSM availability
 if (-not (Get-Command nssm -ErrorAction SilentlyContinue)) {
@@ -61,6 +86,12 @@ if (-not $WorkDir) {
 if (-not $EnvFile) {
     $EnvFile = Join-Path $ProjectRoot '.env'
 }
+if (-not $ProfileRoot) {
+    $ProfileRoot = Get-InferredProfileRoot $WorkDir
+    if (-not $ProfileRoot) {
+        $ProfileRoot = Get-InferredProfileRoot $BinaryPath
+    }
+}
 
 if (-not (Test-Path $BinaryPath)) {
     Write-Error "Binary not found: $BinaryPath"
@@ -71,6 +102,9 @@ Write-Host "Installing service '$ServiceName'..." -ForegroundColor Green
 Write-Host "  Binary : $BinaryPath"
 Write-Host "  WorkDir: $WorkDir"
 Write-Host "  EnvFile: $EnvFile"
+if ($ProfileRoot) {
+    Write-Host "  Profile: $ProfileRoot"
+}
 Write-Host "  Restart: on exit (${RestartDelayMs}ms delay)"
 
 # Install service
@@ -96,19 +130,39 @@ nssm set $ServiceName AppRotateFiles 1
 nssm set $ServiceName AppRotateBytes 10485760  # 10 MB
 
 # Load .env into service environment
+$envMap = [ordered]@{}
 if (Test-Path $EnvFile) {
-    $envVars = @()
     Get-Content $EnvFile | ForEach-Object {
         $line = $_.Trim()
         if ($line -and -not $line.StartsWith('#') -and $line -match '^([^=]+)=(.*)$') {
-            $envVars += "$($matches[1].Trim())=$($matches[2].Trim())"
+            $envMap[$matches[1].Trim()] = $matches[2].Trim()
         }
     }
-    if ($envVars.Count -gt 0) {
-        $envString = $envVars -join [char]0
-        nssm set $ServiceName AppEnvironmentExtra $envString
-        Write-Host "  Loaded $($envVars.Count) environment variables from .env" -ForegroundColor Cyan
+}
+
+if ($ProfileRoot -and (Test-Path $ProfileRoot)) {
+    # LocalSystem does not have the interactive user's Codex/npm profile by
+    # default. Point the service at the deployment user's profile so CLI auth
+    # and config resolve the same way they do in an interactive shell.
+    $envMap['USERPROFILE'] = $ProfileRoot
+    $envMap['HOME'] = $ProfileRoot
+
+    $appData = Join-Path $ProfileRoot 'AppData\Roaming'
+    if (Test-Path $appData) {
+        $envMap['APPDATA'] = $appData
     }
+
+    $localAppData = Join-Path $ProfileRoot 'AppData\Local'
+    if (Test-Path $localAppData) {
+        $envMap['LOCALAPPDATA'] = $localAppData
+    }
+}
+
+if ($envMap.Count -gt 0) {
+    $envVars = @($envMap.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" })
+    $envString = $envVars -join [char]0
+    nssm set $ServiceName AppEnvironmentExtra $envString
+    Write-Host "  Loaded $($envVars.Count) environment variables into the service" -ForegroundColor Cyan
 }
 
 Write-Host ""
