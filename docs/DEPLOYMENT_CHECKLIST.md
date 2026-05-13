@@ -34,6 +34,7 @@ command -v opencode
 ```
 
 Codex shim 오류가 있으면 `CODEX_BIN` 네이티브 경로를 사용한다.
+Windows 무인 운영이면 `register-startup.ps1`가 아니라 `install-service.ps1` 서비스 등록을 사용한다. Startup 폴더 등록은 사용자 로그인 전 복구를 보장하지 않는다.
 
 4. 로컬 검증
 

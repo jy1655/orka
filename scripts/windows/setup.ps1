@@ -9,10 +9,26 @@
     Deployment directory. Default: C:\Users\<you>\orka
 .PARAMETER SkipCLIs
     Skip AI CLI tool installation.
+.PARAMETER InstallService
+    Register Orka as a Windows service after prerequisites are prepared. Requires
+    an elevated PowerShell session.
+.PARAMETER InstallNssm
+    Let install-service.ps1 download and install NSSM if it is missing.
+.PARAMETER ServiceName
+    Windows service name used with -InstallService. Default: OrkGateway.
+.PARAMETER ProfileRoot
+    User profile root to expose to the service. Defaults to the current user profile.
+.PARAMETER DelayedAutoStart
+    Use delayed automatic service start when -InstallService is supplied.
 #>
 param(
     [string]$InstallDir,
-    [switch]$SkipCLIs
+    [switch]$SkipCLIs,
+    [switch]$InstallService,
+    [switch]$InstallNssm,
+    [string]$ServiceName = 'OrkGateway',
+    [string]$ProfileRoot,
+    [switch]$DelayedAutoStart
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,6 +44,23 @@ function Test-Command($cmd) {
 function Refresh-Path {
     $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
                 [System.Environment]::GetEnvironmentVariable('Path', 'User')
+}
+
+function Find-WindowsScript {
+    param([string]$Name)
+
+    $candidates = @(
+        (Join-Path $InstallDir $Name),
+        (Join-Path $PSScriptRoot $Name)
+    )
+
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path $candidate)) {
+            return $candidate
+        }
+    }
+
+    return $null
 }
 
 Write-Host "=== Orka Windows Setup ===" -ForegroundColor Cyan
@@ -155,12 +188,56 @@ if (Test-Path $envFile) {
     Write-Host "[WARN] No .env file. Copy .env.example and edit it." -ForegroundColor Yellow
 }
 
+# --- 7. Optional unattended Windows service registration ---
+if ($InstallService) {
+    $binaryPath = Join-Path $InstallDir 'orka-app.exe'
+    $serviceScript = Find-WindowsScript 'install-service.ps1'
+
+    if (-not (Test-Path $binaryPath)) {
+        Write-Error "Cannot install service because binary was not found: $binaryPath"
+        exit 1
+    }
+
+    if (-not $serviceScript) {
+        Write-Error "Cannot install service because install-service.ps1 was not found in $InstallDir or $PSScriptRoot"
+        exit 1
+    }
+
+    if (-not $ProfileRoot) {
+        $ProfileRoot = $env:USERPROFILE
+    }
+
+    $serviceArgs = @{
+        ServiceName = $ServiceName
+        BinaryPath = $binaryPath
+        WorkDir = $InstallDir
+        EnvFile = $envFile
+        ProfileRoot = $ProfileRoot
+    }
+    if ($InstallNssm) {
+        $serviceArgs['InstallNssm'] = $true
+    }
+    if ($DelayedAutoStart) {
+        $serviceArgs['DelayedAutoStart'] = $true
+    }
+
+    Write-Host ""
+    Write-Host "Installing unattended Windows service..." -ForegroundColor Cyan
+    & $serviceScript @serviceArgs
+}
+
 Write-Host ""
 Write-Host "=== Setup complete ===" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "Next steps:" -ForegroundColor White
-Write-Host "  1. Copy orka-app.exe to $InstallDir"
-Write-Host "  2. Copy .env.example to $InstallDir\.env and edit with your tokens"
-Write-Host "  3. Set CODEX_BIN to the codex-wrapper.cmd path in .env"
-Write-Host "  4. Run: pwsh -File $InstallDir\start-orka.ps1"
-Write-Host "  5. Auto-start: pwsh -File $InstallDir\register-startup.ps1"
+if ($InstallService) {
+    Write-Host "  1. Start now: nssm start $ServiceName"
+    Write-Host "  2. Verify: nssm status $ServiceName"
+    Write-Host "  3. Check logs: $InstallDir\logs\orka-stdout.log and orka-stderr.log"
+} else {
+    Write-Host "  1. Copy orka-app.exe to $InstallDir"
+    Write-Host "  2. Copy .env.example to $InstallDir\.env and edit with your tokens"
+    Write-Host "  3. Set CODEX_BIN to the codex-wrapper.cmd path in .env"
+    Write-Host "  4. Unattended boot: run this script again with -InstallService -InstallNssm -DelayedAutoStart"
+    Write-Host "  5. Login-only start: pwsh -File $InstallDir\register-startup.ps1"
+}

@@ -357,13 +357,11 @@ fn parse_codex_output(values: &[JsonValue]) -> ParsedOutput {
     for value in values {
         let typ = value.get("type").and_then(JsonValue::as_str).unwrap_or("");
         match typ {
-            "thread.started" => {
-                if session_id.is_none() {
-                    session_id = value
-                        .get("thread_id")
-                        .and_then(JsonValue::as_str)
-                        .map(ToOwned::to_owned);
-                }
+            "thread.started" if session_id.is_none() => {
+                session_id = value
+                    .get("thread_id")
+                    .and_then(JsonValue::as_str)
+                    .map(ToOwned::to_owned);
             }
             "item.completed" | "item.updated" => {
                 if let Some(item) = value.get("item") {

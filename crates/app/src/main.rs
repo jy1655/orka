@@ -389,7 +389,7 @@ async fn run_main_loop(
 
               // Periodically evict unused scope locks (every 100 events).
               eviction_counter += 1;
-              if eviction_counter % 100 == 0 {
+              if eviction_counter.is_multiple_of(100) {
                 evict_unused_scope_locks(&scope_locks).await;
                 rate_limiter.lock().await.evict_stale();
               }
