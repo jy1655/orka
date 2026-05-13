@@ -59,6 +59,8 @@ cargo run -p orka-app
 - `cargo run -p orka-app -- onboard` 는 `.env`를 생성/갱신하는 보조 명령이다.
 - `cargo run -p orka-app -- status --deep` 는 현재 설정/바이너리/DB 상태를 한 번에 보여준다.
 - `orka-app`은 현재 디렉토리 또는 상위 디렉토리의 `.env`를 자동으로 로드한다.
+- Windows 미니 PC에서 PIN/password 입력 전 자동 복구가 필요하면 Startup 폴더가 아니라
+  `scripts/windows/install-service.ps1`로 NSSM 서비스를 등록한다.
 
 정상 기동 로그 기준:
 

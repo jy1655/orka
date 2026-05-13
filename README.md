@@ -711,8 +711,8 @@ cli-rs-gateway-DT/
 │   └── windows/               # Windows 배포 스크립트
 │       ├── setup.ps1          # 전제조건 자동 설치 (VC++ Runtime, pwsh7, Node.js, Codex)
 │       ├── start-orka.ps1     # .env 로드 + 실행
-│       ├── register-startup.ps1 # 시작프로그램 등록/해제
-│       └── install-service.ps1 # NSSM 서비스 등록
+│       ├── install-service.ps1 # 로그인 전 자동 복구용 NSSM 서비스 등록
+│       └── register-startup.ps1 # 로그인 세션용 시작프로그램 등록/해제
 ├── docs/                      # 설계 문서
 ├── .env.example               # 환경변수 템플릿
 └── Cargo.toml                 # Workspace 설정
@@ -742,6 +742,8 @@ scp target/x86_64-pc-windows-gnu/release/orka-app.exe user@windows-pc:"C:/Users/
 Windows PC에 필요한 것:
 - **Visual C++ Redistributable** (Codex CLI에 필요)
 - **Node.js** + `npm install -g @openai/codex` (AI CLI)
+
+무인 운영 미니 PC처럼 재부팅 후 PIN 입력 전 자동 복구가 필요하면 `scripts/windows/install-service.ps1`로 NSSM 서비스를 등록하세요. `register-startup.ps1`는 사용자 로그인 뒤에만 실행되는 편의용입니다.
 
 상세 가이드: [`docs/WINDOWS_DEPLOYMENT.md`](docs/WINDOWS_DEPLOYMENT.md)
 

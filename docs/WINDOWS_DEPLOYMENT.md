@@ -50,6 +50,7 @@ scp target/x86_64-pc-windows-gnu/release/orka-app.exe user@windows-pc:"C:/Users/
 scp -r migrations user@windows-pc:"C:/Users/you/orka/"
 scp scripts/windows/setup.ps1 user@windows-pc:"C:/Users/you/orka/"
 scp scripts/windows/start-orka.ps1 user@windows-pc:"C:/Users/you/orka/"
+scp scripts/windows/install-service.ps1 user@windows-pc:"C:/Users/you/orka/"
 scp scripts/windows/register-startup.ps1 user@windows-pc:"C:/Users/you/orka/"
 scp .env.example user@windows-pc:"C:/Users/you/orka/.env.example"
 ```
@@ -71,8 +72,12 @@ C:\Users\you\orka\orka-app.exe status --deep
 # 실행
 pwsh -ExecutionPolicy Bypass -File C:\Users\you\orka\start-orka.ps1
 
-# 자동 시작 등록
-pwsh -ExecutionPolicy Bypass -File C:\Users\you\orka\register-startup.ps1
+# 로그인 전 무인 자동 복구 등록 (관리자 PowerShell)
+powershell -ExecutionPolicy Bypass -File C:\Users\you\orka\install-service.ps1 `
+  -BinaryPath C:\Users\you\orka\orka-app.exe `
+  -InstallNssm `
+  -DelayedAutoStart
+nssm start OrkGateway
 ```
 
 ## Configuration (.env)
@@ -114,13 +119,17 @@ CODEX_SESSION_ARGS=exec --json --skip-git-repo-check
 `install-service.ps1`는 `orka-app.exe`가 비정상 종료되면 NSSM이 다시 시작하도록 기본 재시작 정책을 설정합니다.
 
 ```powershell
-choco install nssm
-.\scripts\windows\install-service.ps1 -BinaryPath C:\Users\you\orka\orka-app.exe
+powershell -ExecutionPolicy Bypass -File C:\Users\you\orka\install-service.ps1 `
+  -BinaryPath C:\Users\you\orka\orka-app.exe `
+  -InstallNssm `
+  -DelayedAutoStart
 nssm start OrkGateway
 ```
 
 크로스 컴파일 후 `orka-app.exe`를 `C:\Users\you\orka\`로 복사한 배포 레이아웃에서는 위처럼 `-BinaryPath`를 명시하세요.
 스크립트의 기본값은 로컬 Windows 네이티브 빌드 산출물인 `target\release\orka-app.exe`를 가정합니다.
+`-InstallNssm`은 NSSM이 없을 때 `C:\ProgramData\nssm`에 내려받아 설치하고 Machine PATH에 추가합니다. 이미 NSSM을 직접 설치했다면 생략해도 됩니다.
+`-DelayedAutoStart`는 재부팅 직후 네트워크 서비스가 안정화될 시간을 주지만, 사용자 PIN/password 입력 전에도 서비스가 시작됩니다.
 서비스는 `LocalSystem`으로 등록되지만, `install-service.ps1`는 배포 경로가 `C:\Users\...` 아래에 있으면 해당 사용자 프로필을 자동으로 서비스 환경(`USERPROFILE/HOME/APPDATA/LOCALAPPDATA`)에 주입합니다.
 이렇게 해야 `codex-wrapper.cmd`와 사용자 프로필 기반 Codex 인증/설정이 서비스 실행에서도 동일하게 보입니다.
 배포 경로와 실제 Codex 프로필 루트가 다르면 `-ProfileRoot C:\Users\actual-user`를 함께 넘기세요.
@@ -136,15 +145,19 @@ pwsh -ExecutionPolicy Bypass -File C:\Users\you\orka\register-startup.ps1 -Unreg
 ```
 
 사용자 로그인 시 자동으로 `start-orka.ps1`이 한 번 실행됩니다.
-이 방식은 편의용이며, 프로세스가 종료된 뒤 자동 복구를 보장하지 않습니다.
+이 방식은 편의용이며, PIN/password 입력 전 시작이나 프로세스 종료 뒤 자동 복구를 보장하지 않습니다.
 
 ## Remote Deployment via SSH
 
 SSH로 원격 배포 시 추가 주의사항:
 
 ```bash
-# 스크립트 전송 후 setup.ps1로 한 번에 설치
+# 스크립트 전송 후 전제조건 설치
 ssh user@windows-pc "powershell -ExecutionPolicy Bypass -File C:\Users\you\orka\setup.ps1"
+
+# 관리자 권한이 있는 SSH 세션에서 로그인 전 자동 복구 서비스 등록
+ssh user@windows-pc "powershell -ExecutionPolicy Bypass -File C:\Users\you\orka\install-service.ps1 -BinaryPath C:\Users\you\orka\orka-app.exe -InstallNssm -DelayedAutoStart"
+ssh user@windows-pc "nssm start OrkGateway"
 ```
 
 ### SSH 세션 주의사항

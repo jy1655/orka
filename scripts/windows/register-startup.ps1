@@ -1,9 +1,11 @@
 <#
 .SYNOPSIS
-    Registers Orka to start automatically at Windows logon.
+    Registers Orka to start automatically after Windows user logon.
 .DESCRIPTION
     Creates a .cmd file in the user's Startup folder that launches orka-app.exe
-    via start-orka.ps1. This survives reboots and does not require admin privileges.
+    via start-orka.ps1. This does not require admin privileges, but it only runs
+    after the user signs in. Use install-service.ps1 for unattended boot before
+    PIN/password entry.
 .PARAMETER InstallDir
     Directory containing orka-app.exe and .env. Default: same directory as this script.
 .PARAMETER Unregister
@@ -50,5 +52,6 @@ Set-Content $startupFile $content
 Write-Host "Startup entry created:" -ForegroundColor Green
 Write-Host "  $startupFile" -ForegroundColor Cyan
 Write-Host ""
-Write-Host "Orka will start automatically at next logon." -ForegroundColor White
+Write-Host "Orka will start automatically at next user logon." -ForegroundColor White
+Write-Host "For unattended boot before PIN/password entry, use install-service.ps1." -ForegroundColor Yellow
 Write-Host "To remove: pwsh -File $($MyInvocation.MyCommand.Path) -Unregister" -ForegroundColor Yellow
