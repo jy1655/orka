@@ -141,6 +141,24 @@ impl GatewayPipeline {
             return Ok(());
         }
 
+        if !self.policy.can_invoke_runtime(
+            event.channel,
+            &event.chat_id,
+            &event.user_id,
+            &event.claims,
+        ) {
+            self.dispatch(
+                event.reply(
+                    "AI access is restricted to allowlisted operators or approved channels."
+                        .to_string(),
+                ),
+                None,
+                Some(&scope_key),
+            )
+            .await?;
+            return Ok(());
+        }
+
         if self.store.is_paused(&scope_key).await? {
             let paused =
                 event.reply("This session is paused. Use /resume (operator only).".to_string());
@@ -350,6 +368,15 @@ impl GatewayPipeline {
 
     async fn cmd_envvars(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
         if !self.require_operator(event).await? {
+            return Ok(());
+        }
+        if !event.is_direct_message {
+            self.dispatch(
+                event.reply("envvars is available only in direct messages.".to_string()),
+                None,
+                Some(scope_key),
+            )
+            .await?;
             return Ok(());
         }
 
@@ -1091,7 +1118,12 @@ mod tests {
             store,
             runtime.clone(),
             outbound,
-            AccessPolicy::new(vec!["discord:user-1".to_string()], false),
+            AccessPolicy::with_runtime_access(
+                vec!["discord:user-1".to_string()],
+                false,
+                true,
+                Vec::<String>::new(),
+            ),
             RuntimePreference {
                 provider: ProviderKind::Claude,
                 mode: RuntimeMode::Event,
@@ -1118,6 +1150,38 @@ mod tests {
             .clone()
             .expect("runtime request exists");
         assert_eq!(last.provider, ProviderKind::Claude);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn public_runtime_messages_require_operator_or_channel_approval() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store,
+            runtime.clone(),
+            outbound.clone(),
+            AccessPolicy::new(vec!["discord:admin-1".to_string()], false),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Event,
+            },
+            false,
+            String::new(),
+        );
+
+        pipeline
+            .handle_event(event_with_text("evt-denied", "user-1", "hello"))
+            .await?;
+
+        assert!(runtime.last_request.lock().await.is_none());
+        let actions = outbound.actions.lock().await;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].text,
+            "AI access is restricted to allowlisted operators or approved channels.".to_string()
+        );
         Ok(())
     }
 
@@ -1393,7 +1457,7 @@ mod tests {
         );
 
         pipeline
-            .handle_event(event_with_text("evt-envvars", "user-1", "/envvars"))
+            .handle_event(direct_message_event("evt-envvars", "user-1", "/envvars"))
             .await?;
 
         let actions = outbound.actions.lock().await;
@@ -1401,6 +1465,37 @@ mod tests {
         assert!(actions[0].text.contains("envvars"));
         assert!(actions[0].text.contains("runtime_engine=cli"));
         assert!(actions[0].text.contains("default_provider=codex"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn envvars_command_is_direct_message_only() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(None));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store,
+            runtime,
+            outbound.clone(),
+            AccessPolicy::new(vec!["discord:user-1".to_string()], false),
+            RuntimePreference {
+                provider: ProviderKind::Codex,
+                mode: RuntimeMode::Session,
+            },
+            false,
+            "runtime_engine=cli\ndefault_provider=codex".to_string(),
+        );
+
+        pipeline
+            .handle_event(event_with_text("evt-envvars-public", "user-1", "/envvars"))
+            .await?;
+
+        let actions = outbound.actions.lock().await;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(
+            actions[0].text,
+            "envvars is available only in direct messages.".to_string()
+        );
         Ok(())
     }
 }

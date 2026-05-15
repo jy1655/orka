@@ -1,6 +1,6 @@
 # Windows Deployment Guide
 
-Orka runs on Windows without code modifications. All dependencies (tokio, sqlx/SQLite, serenity, reqwest) fully support Windows. Discord transport now uses the platform native TLS backend, and migration SQL is loaded from the runtime `migrations/` directory, so that folder must be deployed alongside the binary.
+Orka runs on Windows without code modifications. All dependencies (tokio, sqlx/SQLite, serenity, reqwest) fully support Windows. Discord and Telegram HTTP/TLS traffic use Rustls, and migration SQL is loaded from the runtime `migrations/` directory, so that folder must be deployed alongside the binary.
 
 ## Tested Environment
 
@@ -87,6 +87,10 @@ Copy `.env.example` to `.env` and set values. Windows-specific notes:
 - **Paths**: Use `/` or `\\` as separator (e.g., `C:/Users/you/orka/data/orka.db`)
 - **DATABASE_URL**: `sqlite://data/orka-gateway.db` (relative) works fine, or use an absolute path
 - **ALLOWLIST**: keep Discord/Telegram user IDs in `ALLOWLIST` if those users should be allowed to use DM conversations
+- **CHANNEL_ALLOWLIST**: add only trusted Discord channel IDs or Telegram chat IDs where non-operators may invoke AI
+- **PUBLIC_CHAT**: keep `false` for live use
+- **RATE_LIMIT_MAX_REQUESTS**: keep non-zero in `RUNTIME_ENGINE=cli` deployments
+- **HEALTH_BEARER_TOKEN**: set before binding `HEALTH_BIND` to a LAN/public address
 
 ### Codex CLI 권한 설정
 
@@ -130,9 +134,12 @@ nssm start OrkGateway
 스크립트의 기본값은 로컬 Windows 네이티브 빌드 산출물인 `target\release\orka-app.exe`를 가정합니다.
 `-InstallNssm`은 NSSM이 없을 때 `C:\ProgramData\nssm`에 내려받아 설치하고 Machine PATH에 추가합니다. 이미 NSSM을 직접 설치했다면 생략해도 됩니다.
 `-DelayedAutoStart`는 재부팅 직후 네트워크 서비스가 안정화될 시간을 주지만, 사용자 PIN/password 입력 전에도 서비스가 시작됩니다.
-서비스는 `LocalSystem`으로 등록되지만, `install-service.ps1`는 배포 경로가 `C:\Users\...` 아래에 있으면 해당 사용자 프로필을 자동으로 서비스 환경(`USERPROFILE/HOME/APPDATA/LOCALAPPDATA`)에 주입합니다.
-이렇게 해야 `codex-wrapper.cmd`와 사용자 프로필 기반 Codex 인증/설정이 서비스 실행에서도 동일하게 보입니다.
-배포 경로와 실제 Codex 프로필 루트가 다르면 `-ProfileRoot C:\Users\actual-user`를 함께 넘기세요.
+서비스는 기본적으로 `NT SERVICE\OrkGateway` 가상 서비스 계정으로 등록됩니다. `LocalSystem`은 provider CLI까지 머신 최고 권한으로 실행하므로 라이브 운영에서는 사용하지 마세요.
+provider CLI가 사용자 프로필의 인증/설정을 필요로 하면 전용 저권한 Windows 사용자로 서비스를 등록하고 `-ServiceAccount .\orka-svc -ServicePassword ... -ProfileRoot C:\Users\orka-svc`를 사용하세요.
+`install-service.ps1`는 기본적으로 앱의 `.env` 자동 로드를 `ORKA_DISABLE_DOTENV=true`로 끕니다. 라이브 운영에서는 봇 토큰과 provider 설정을 서비스 계정의 환경 변수나 별도 credential loader로 제공하세요.
+`-ImportEnvFile`을 쓰면 `.env` 값이 NSSM service configuration에 평문으로 저장되므로 로컬 테스트나 완전히 신뢰된 장비에서만 사용하세요.
+PowerShell 스크립트의 `.env` fallback 파서는 단순 `KEY=VALUE` 형식만 지원합니다. 따옴표, 줄바꿈, 복잡한 이스케이프가 필요한 값은 `.env` 대신 서비스 계정 환경 변수나 credential loader에 넣으세요.
+설치 스크립트는 NSSM console stop timeout을 15초로 설정해 기본 `SHUTDOWN_DRAIN_TIMEOUT_MS=10000`보다 길게 둡니다. shutdown drain timeout을 늘리면 NSSM stop timeout도 함께 늘리세요.
 
 ### 방법 2: register-startup.ps1 (로그인 세션용, 관리자 불필요)
 
@@ -168,7 +175,7 @@ ssh user@windows-pc "nssm start OrkGateway"
 | PowerShell 스크립트 실행 거부 | ExecutionPolicy 기본값이 Restricted | `-ExecutionPolicy Bypass` 플래그 사용 |
 | SSH 세션 종료 시 프로세스 죽음 | SSH 프로세스 트리가 함께 종료 | 상시 운용이면 NSSM 서비스 사용. 로그인 세션 기반이면 `register-startup.ps1` 등록 후 로그인으로 시작 |
 | Tailscale IP로 SSH 불가 | 재부팅 후 Tailscale 서비스 시작 지연 | 부팅 후 1-2분 대기, 또는 로컬 IP 사용 |
-| Discord/Telegram에서 즉시 `runtime error: request failed...` | Windows 서비스가 `LocalSystem`으로 떠서 사용자 프로필 기반 Codex/npm 인증을 못 봄 | `install-service.ps1`로 서비스를 다시 설치하거나 `-ProfileRoot C:\Users\you`를 지정해 `USERPROFILE/HOME/APPDATA/LOCALAPPDATA`를 서비스 환경에 주입 |
+| Discord/Telegram에서 즉시 `runtime error: request failed...` | 서비스 계정이 provider CLI 인증/설정을 못 봄 | 전용 저권한 서비스 계정을 만들고 해당 계정으로 CLI 로그인 후 `-ServiceAccount`/`-ProfileRoot`로 서비스를 다시 등록 |
 
 ## Verification
 

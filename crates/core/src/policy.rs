@@ -6,11 +6,27 @@ use crate::model::Channel;
 pub struct AccessPolicy {
     operators: HashSet<String>,
     open_access: bool,
+    public_chat: bool,
+    runtime_channels: HashSet<String>,
 }
 
 impl AccessPolicy {
     pub fn new(allowlist: impl IntoIterator<Item = String>, open_access: bool) -> Self {
+        Self::with_runtime_access(allowlist, open_access, false, Vec::<String>::new())
+    }
+
+    pub fn with_runtime_access(
+        allowlist: impl IntoIterator<Item = String>,
+        open_access: bool,
+        public_chat: bool,
+        runtime_channels: impl IntoIterator<Item = String>,
+    ) -> Self {
         let operators = allowlist
+            .into_iter()
+            .map(|entry| entry.trim().to_ascii_lowercase())
+            .filter(|entry| !entry.is_empty())
+            .collect();
+        let runtime_channels = runtime_channels
             .into_iter()
             .map(|entry| entry.trim().to_ascii_lowercase())
             .filter(|entry| !entry.is_empty())
@@ -18,6 +34,8 @@ impl AccessPolicy {
         Self {
             operators,
             open_access,
+            public_chat,
+            runtime_channels,
         }
     }
 
@@ -50,6 +68,25 @@ impl AccessPolicy {
             }
         }
         false
+    }
+
+    pub fn can_invoke_runtime(
+        &self,
+        channel: Channel,
+        chat_id: &str,
+        user_id: &str,
+        claims: &[String],
+    ) -> bool {
+        if self.is_operator(channel, user_id, claims) || self.public_chat {
+            return true;
+        }
+
+        let channel_key = format!(
+            "{}:{}",
+            channel.as_str(),
+            chat_id.trim().to_ascii_lowercase()
+        );
+        self.runtime_channels.contains(&channel_key)
     }
 }
 
@@ -101,5 +138,26 @@ mod tests {
         let policy = AccessPolicy::new(vec!["role:admin".to_string()], false);
         assert!(policy.is_operator(Channel::Discord, "user-1", &["role:admin".to_string()]));
         assert!(policy.is_operator(Channel::Telegram, "user-1", &["role:admin".to_string()]));
+    }
+
+    #[test]
+    fn runtime_access_defaults_to_operator_or_allowlisted_channel() {
+        let policy = AccessPolicy::with_runtime_access(
+            vec!["discord:admin".to_string()],
+            false,
+            false,
+            vec!["discord:channel-1".to_string()],
+        );
+
+        assert!(policy.can_invoke_runtime(Channel::Discord, "other-channel", "admin", &[]));
+        assert!(policy.can_invoke_runtime(Channel::Discord, "channel-1", "user-1", &[]));
+        assert!(!policy.can_invoke_runtime(Channel::Discord, "other-channel", "user-1", &[]));
+    }
+
+    #[test]
+    fn public_chat_allows_runtime_access_without_operator() {
+        let policy = AccessPolicy::with_runtime_access(Vec::<String>::new(), false, true, []);
+
+        assert!(policy.can_invoke_runtime(Channel::Telegram, "-100123", "user-1", &[]));
     }
 }

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::{
     extract::State,
-    http::{header::CONTENT_TYPE, HeaderValue, StatusCode},
-    response::IntoResponse,
+    http::{header::AUTHORIZATION, header::CONTENT_TYPE, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     routing::get,
     Router,
 };
@@ -19,13 +19,15 @@ use orka_core::pipeline::{GatewayMetricsSnapshot, GatewayPipeline};
 pub struct HealthState {
     pub ready: Arc<AtomicBool>,
     pipeline: Arc<GatewayPipeline>,
+    bearer_token: Arc<str>,
 }
 
 impl HealthState {
-    pub fn new(pipeline: Arc<GatewayPipeline>) -> Self {
+    pub fn new(pipeline: Arc<GatewayPipeline>, bearer_token: String) -> Self {
         Self {
             ready: Arc::new(AtomicBool::new(false)),
             pipeline,
+            bearer_token: Arc::<str>::from(bearer_token),
         }
     }
 }
@@ -49,19 +51,36 @@ pub async fn spawn_health_server(
     }))
 }
 
-async fn healthz() -> impl IntoResponse {
-    "ok"
+async fn healthz(State(state): State<HealthState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    "ok".into_response()
 }
 
-async fn readyz(State(state): State<HealthState>) -> impl IntoResponse {
+async fn readyz(State(state): State<HealthState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&state, &headers) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
     if state.ready.load(Ordering::Relaxed) {
-        (StatusCode::OK, "ready")
+        (StatusCode::OK, "ready").into_response()
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, "not_ready")
+        (StatusCode::SERVICE_UNAVAILABLE, "not_ready").into_response()
     }
 }
 
-async fn metrics(State(state): State<HealthState>) -> impl IntoResponse {
+async fn metrics(State(state): State<HealthState>, headers: HeaderMap) -> Response {
+    if !is_authorized(&state, &headers) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            )],
+            "unauthorized".to_string(),
+        )
+            .into_response();
+    }
     let snapshot = state.pipeline.metrics_snapshot();
     let body = render_metrics(snapshot);
 
@@ -72,6 +91,20 @@ async fn metrics(State(state): State<HealthState>) -> impl IntoResponse {
         )],
         body,
     )
+        .into_response()
+}
+
+fn is_authorized(state: &HealthState, headers: &HeaderMap) -> bool {
+    let token = state.bearer_token.trim();
+    if token.is_empty() {
+        return true;
+    }
+
+    let expected = format!("Bearer {token}");
+    headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value == expected)
 }
 
 fn render_metrics(snapshot: GatewayMetricsSnapshot) -> String {
@@ -100,9 +133,127 @@ fn render_metrics(snapshot: GatewayMetricsSnapshot) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render_metrics;
-    use orka_core::model::{ProviderKind, ProviderStatus, RuntimeMode};
+    use super::{is_authorized, render_metrics, HealthState};
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use async_trait::async_trait;
+    use axum::http::{header::AUTHORIZATION, HeaderMap, HeaderValue};
+    use orka_core::model::{
+        AuditEntry, InboundEvent, OutboundAction, ProviderKind, ProviderStatus, RuntimeLogContext,
+        RuntimeMode, RuntimePreference,
+    };
+    use orka_core::pipeline::GatewayPipeline;
     use orka_core::pipeline::{GatewayMetricsSnapshot, ProviderRequestMetric};
+    use orka_core::policy::AccessPolicy;
+    use orka_core::ports::{EchoAgentRuntime, EventStore, OutboundSender};
+
+    struct NullEventStore;
+
+    #[async_trait]
+    impl EventStore for NullEventStore {
+        async fn has_seen(&self, _idempotency_key: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn save_inbound(&self, _event: &InboundEvent) -> Result<()> {
+            Ok(())
+        }
+
+        async fn save_outbound(
+            &self,
+            _action: &OutboundAction,
+            _runtime: Option<RuntimeLogContext>,
+            _scope_key: Option<&str>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn is_paused(&self, _scope_key: &str) -> Result<bool> {
+            Ok(false)
+        }
+
+        async fn set_paused(&self, _scope_key: &str, _paused: bool) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_runtime_preference(
+            &self,
+            _scope_key: &str,
+        ) -> Result<Option<RuntimePreference>> {
+            Ok(None)
+        }
+
+        async fn set_runtime_preference(
+            &self,
+            _scope_key: &str,
+            _preference: &RuntimePreference,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn get_provider_session(
+            &self,
+            _scope_key: &str,
+            _provider: ProviderKind,
+        ) -> Result<Option<String>> {
+            Ok(None)
+        }
+
+        async fn set_provider_session(
+            &self,
+            _scope_key: &str,
+            _provider: ProviderKind,
+            _session_id: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_provider_session_for(
+            &self,
+            _scope_key: &str,
+            _provider: ProviderKind,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_provider_session(&self, _scope_key: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn query_recent_events(
+            &self,
+            _scope_key: &str,
+            _limit: usize,
+        ) -> Result<Vec<AuditEntry>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct NullOutboundSender;
+
+    #[async_trait]
+    impl OutboundSender for NullOutboundSender {
+        async fn send(&self, _action: &OutboundAction) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    fn health_state(token: &str) -> HealthState {
+        let pipeline = GatewayPipeline::new(
+            Arc::new(NullEventStore),
+            Arc::new(EchoAgentRuntime),
+            Arc::new(NullOutboundSender),
+            AccessPolicy::new(Vec::<String>::new(), false),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Event,
+            },
+            false,
+            String::new(),
+        );
+        HealthState::new(Arc::new(pipeline), token.to_string())
+    }
 
     #[test]
     fn render_metrics_outputs_prometheus_samples() {
@@ -135,5 +286,24 @@ mod tests {
         assert!(body.contains(
             "orka_provider_requests_total{provider=\"codex\",mode=\"event\",status=\"error\"} 1"
         ));
+    }
+
+    #[test]
+    fn empty_health_bearer_token_allows_probe_without_authorization_header() {
+        let state = health_state("");
+        assert!(is_authorized(&state, &HeaderMap::new()));
+    }
+
+    #[test]
+    fn configured_health_bearer_token_requires_matching_authorization_header() {
+        let state = health_state("secret-token");
+        let mut headers = HeaderMap::new();
+        assert!(!is_authorized(&state, &headers));
+
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer secret-token"),
+        );
+        assert!(is_authorized(&state, &headers));
     }
 }

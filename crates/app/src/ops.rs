@@ -97,6 +97,8 @@ struct StatusSnapshot {
     default_provider: ProviderKind,
     default_runtime_mode: RuntimeMode,
     health_bind: String,
+    health_bearer_configured: bool,
+    health_externally_reachable_bind: bool,
     health_parse_ok: bool,
     health_reachable: bool,
     database_url: String,
@@ -107,8 +109,12 @@ struct StatusSnapshot {
     discord_configured: bool,
     telegram_configured: bool,
     open_access: bool,
+    public_chat: bool,
     allowlist_entries: usize,
+    channel_allowlist_entries: usize,
     store_full_payloads: bool,
+    rate_limit_window_secs: u64,
+    rate_limit_max_requests: usize,
     timeout_ms: u64,
     max_output_bytes: usize,
     claude: ProviderBinaryStatus,
@@ -180,6 +186,7 @@ fn collect_status_snapshot(
     let health_targets = health_probe_targets(&cfg.health_bind);
     let health_parse_ok = !health_targets.is_empty();
     let health_reachable = health_parse_ok && health_endpoint_reachable(&health_targets);
+    let health_externally_reachable_bind = is_external_health_bind(&cfg.health_bind);
 
     StatusSnapshot {
         workspace_root: workspace_root.to_path_buf(),
@@ -188,6 +195,8 @@ fn collect_status_snapshot(
         default_provider: cfg.default_provider,
         default_runtime_mode: cfg.default_runtime_mode,
         health_bind: cfg.health_bind.clone(),
+        health_bearer_configured: !cfg.health_bearer_token.trim().is_empty(),
+        health_externally_reachable_bind,
         health_parse_ok,
         health_reachable,
         database_url: cfg.database_url.clone(),
@@ -198,8 +207,12 @@ fn collect_status_snapshot(
         discord_configured: !cfg.discord_bot_token.trim().is_empty(),
         telegram_configured: !cfg.telegram_bot_token.trim().is_empty(),
         open_access: cfg.open_access,
+        public_chat: cfg.public_chat,
         allowlist_entries: cfg.allowlist.len(),
+        channel_allowlist_entries: cfg.channel_allowlist.len(),
         store_full_payloads: cfg.store_full_payloads,
+        rate_limit_window_secs: cfg.rate_limit_window_secs,
+        rate_limit_max_requests: cfg.rate_limit_max_requests,
         timeout_ms: cfg.cli_runtime.timeout_ms,
         max_output_bytes: cfg.cli_runtime.max_output_bytes,
         claude,
@@ -244,6 +257,12 @@ fn build_doctor_checks(snapshot: &StatusSnapshot) -> Vec<DoctorCheck> {
             format!("invalid HEALTH_BIND `{}`", snapshot.health_bind),
         )
     });
+    if snapshot.health_externally_reachable_bind && !snapshot.health_bearer_configured {
+        checks.push(warn_check(
+            "health",
+            "HEALTH_BIND is not loopback; set HEALTH_BEARER_TOKEN or keep it behind authenticated local access".to_string(),
+        ));
+    }
 
     checks.push(match &snapshot.database_path {
         Some(path) if path.parent().map(|parent| parent.exists()).unwrap_or(true) => {
@@ -272,20 +291,61 @@ fn build_doctor_checks(snapshot: &StatusSnapshot) -> Vec<DoctorCheck> {
             "policy",
             "OPEN_ACCESS=true allows all non-empty senders to use the gateway".to_string(),
         )
+    } else if snapshot.public_chat && snapshot.channel_allowlist_entries == 0 {
+        warn_check(
+            "policy",
+            "PUBLIC_CHAT=true allows non-operator AI access in every joined channel".to_string(),
+        )
+    } else if snapshot.public_chat {
+        warn_check(
+            "policy",
+            "PUBLIC_CHAT=true allows non-operator AI access; prefer CHANNEL_ALLOWLIST for production".to_string(),
+        )
     } else if snapshot.allowlist_entries == 0 {
         warn_check(
             "policy",
-            "ALLOWLIST is empty; operator commands will not be available".to_string(),
+            "ALLOWLIST is empty; only CHANNEL_ALLOWLIST entries can invoke AI in public channels".to_string(),
+        )
+    } else if snapshot.channel_allowlist_entries == 0 {
+        ok_check(
+            "policy",
+            format!(
+                "operator-only runtime access allowlist_entries={}",
+                snapshot.allowlist_entries
+            ),
         )
     } else {
         ok_check(
             "policy",
             format!(
-                "open_access=false allowlist_entries={}",
-                snapshot.allowlist_entries
+                "allowlist_entries={} channel_allowlist_entries={}",
+                snapshot.allowlist_entries, snapshot.channel_allowlist_entries
             ),
         )
     });
+
+    if snapshot.runtime_engine == RuntimeEngine::Cli && snapshot.rate_limit_max_requests == 0 {
+        checks.push(warn_check(
+            "rate_limit",
+            "RATE_LIMIT_MAX_REQUESTS=0 disables provider request throttling in cli mode"
+                .to_string(),
+        ));
+    } else {
+        checks.push(ok_check(
+            "rate_limit",
+            format!(
+                "{} request(s) per {} second(s)",
+                snapshot.rate_limit_max_requests, snapshot.rate_limit_window_secs
+            ),
+        ));
+    }
+
+    if snapshot.store_full_payloads {
+        checks.push(warn_check(
+            "storage",
+            "STORE_FULL_PAYLOADS=true stores message text in SQLite".to_string(),
+        ));
+    }
 
     match snapshot.runtime_engine {
         RuntimeEngine::Echo => {
@@ -406,8 +466,14 @@ fn render_status_report(snapshot: &StatusSnapshot, deep: bool) -> String {
                 .unwrap_or_else(|| "missing".to_string())
         ),
         format!(
-            "policy: open_access={} · allowlist={} · store_full_payloads={}",
-            snapshot.open_access, snapshot.allowlist_entries, snapshot.store_full_payloads
+            "policy: open_access={} · public_chat={} · allowlist={} · channel_allowlist={} · store_full_payloads={} · rate_limit={}/{}s",
+            snapshot.open_access,
+            snapshot.public_chat,
+            snapshot.allowlist_entries,
+            snapshot.channel_allowlist_entries,
+            snapshot.store_full_payloads,
+            snapshot.rate_limit_max_requests,
+            snapshot.rate_limit_window_secs
         ),
         "providers:".to_string(),
     ];
@@ -580,6 +646,17 @@ fn health_probe_targets(bind: &str) -> Vec<SocketAddr> {
         }
     }
     targets
+}
+
+fn is_external_health_bind(bind: &str) -> bool {
+    let Ok(addrs) = bind.to_socket_addrs() else {
+        return false;
+    };
+
+    addrs.into_iter().any(|addr| match addr.ip() {
+        IpAddr::V4(ip) => !ip.is_loopback(),
+        IpAddr::V6(ip) => !ip.is_loopback(),
+    })
 }
 
 fn sqlite_path_from_database_url(raw: &str, workspace_root: &Path) -> Option<PathBuf> {
@@ -756,8 +833,11 @@ mod tests {
             telegram_bot_token: "telegram-token".to_string(),
             database_url: "sqlite://data/orka-gateway.db".to_string(),
             health_bind: "127.0.0.1:8787".to_string(),
+            health_bearer_token: String::new(),
             allowlist: vec!["discord:1".to_string()],
             open_access: false,
+            public_chat: false,
+            channel_allowlist: vec!["discord:channel-1".to_string()],
             default_provider: ProviderKind::Codex,
             default_runtime_mode: RuntimeMode::Session,
             session_fail_fallback_event: false,
@@ -784,7 +864,7 @@ mod tests {
             },
             max_concurrent_tasks: 8,
             rate_limit_window_secs: 60,
-            rate_limit_max_requests: 0,
+            rate_limit_max_requests: 5,
             discord_use_embeds: false,
             store_full_payloads: false,
         }

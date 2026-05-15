@@ -1,0 +1,16 @@
+[advisories]
+ignore = [
+  # serenity 0.12.5 still depends on tokio-tungstenite 0.21, which keeps
+  # rand 0.8.5 and has no compatible upgrade until serenity updates its
+  # websocket stack. Tracked in GitHub issue #8.
+  "RUSTSEC-2026-0097",
+
+  # serenity 0.12.5 -> tokio-tungstenite 0.21 -> rustls 0.22 pulls
+  # rustls-webpki 0.102.x. No semver-compatible tokio-tungstenite/rustls
+  # upgrade is available for serenity 0.12.x; keep cargo audit blocking for
+  # every other advisory while tracking the upstream Discord gateway stack.
+  "RUSTSEC-2026-0049",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+]

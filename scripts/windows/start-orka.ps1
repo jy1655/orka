@@ -4,7 +4,8 @@
     Starts Orka gateway with environment variables loaded from .env file.
 .DESCRIPTION
     Loads .env file and runs orka-app.exe. Works with both PowerShell 5.1 and 7+.
-    Logs startup output to logs/orka-startup.log via Start-Transcript.
+    Transcript logging is disabled by default because provider/debug logs can contain
+    token-bearing URLs. Use -EnableTranscript only for short local troubleshooting.
 .PARAMETER EnvFile
     Path to the .env file. Defaults to .env in the same directory as this script.
 .PARAMETER Binary
@@ -12,7 +13,8 @@
 #>
 param(
     [string]$EnvFile,
-    [string]$Binary
+    [string]$Binary,
+    [switch]$EnableTranscript
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,10 +49,12 @@ if (-not (Test-Path $LogDir)) {
     New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 }
 
-try {
-    Start-Transcript -Path $TranscriptPath -Append | Out-Null
-} catch {
-    Write-Warning "Unable to start transcript logging: $($_.Exception.Message)"
+if ($EnableTranscript) {
+    try {
+        Start-Transcript -Path $TranscriptPath -Append | Out-Null
+    } catch {
+        Write-Warning "Unable to start transcript logging: $($_.Exception.Message)"
+    }
 }
 
 # Load .env into current process environment
@@ -64,6 +68,10 @@ Get-Content $EnvFile | ForEach-Object {
     }
 }
 
+if (-not $env:RUST_LOG) {
+    [Environment]::SetEnvironmentVariable('RUST_LOG', 'info', 'Process')
+}
+
 Write-Host "Starting Orka gateway..." -ForegroundColor Green
 Write-Host "  Binary : $Binary"
 Write-Host "  EnvFile: $EnvFile"
@@ -75,8 +83,10 @@ try {
     & $Binary
 }
 finally {
-    try {
-        Stop-Transcript | Out-Null
-    } catch {
+    if ($EnableTranscript) {
+        try {
+            Stop-Transcript | Out-Null
+        } catch {
+        }
     }
 }

@@ -40,7 +40,11 @@ async fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let command = cli::parse_app_command(&args).map_err(Error::msg)?;
     let cwd = env::current_dir()?;
-    let env_path = envfile::load_dotenv_upwards(&cwd)?;
+    let env_path = if dotenv_disabled() {
+        None
+    } else {
+        envfile::load_dotenv_upwards(&cwd)?
+    };
     let workspace_root = env_path
         .as_deref()
         .and_then(|path| path.parent())
@@ -68,13 +72,25 @@ async fn main() -> Result<()> {
     }
 }
 
+fn dotenv_disabled() -> bool {
+    matches!(
+        env::var("ORKA_DISABLE_DOTENV")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 async fn run_gateway(cfg: AppConfig) -> Result<()> {
     info!("booting orka-gateway");
+    warn_risky_live_config(&cfg);
 
     let store = init_store(&cfg).await?;
     let pipeline = build_pipeline(&cfg, store)?;
 
-    let health_state = HealthState::new(pipeline.clone());
+    let health_state = HealthState::new(pipeline.clone(), cfg.health_bearer_token.clone());
     let mut health_task =
         spawn_health_server(cfg.health_bind.clone(), health_state.clone()).await?;
 
@@ -167,7 +183,12 @@ async fn init_store(cfg: &AppConfig) -> Result<Arc<dyn EventStore>> {
 }
 
 fn build_pipeline(cfg: &AppConfig, store: Arc<dyn EventStore>) -> Result<Arc<GatewayPipeline>> {
-    let policy = AccessPolicy::new(cfg.allowlist.clone(), cfg.open_access);
+    let policy = AccessPolicy::with_runtime_access(
+        cfg.allowlist.clone(),
+        cfg.open_access,
+        cfg.public_chat,
+        cfg.channel_allowlist.clone(),
+    );
     let runtime = build_runtime(cfg)?;
     let outbound = build_outbound(cfg);
     let default_runtime = RuntimePreference {
@@ -513,6 +534,26 @@ fn init_tracing() {
         .with_target(true)
         .json()
         .init();
+}
+
+fn warn_risky_live_config(cfg: &AppConfig) {
+    if cfg.runtime_engine == RuntimeEngine::Cli && cfg.rate_limit_max_requests == 0 {
+        warn!("RUNTIME_ENGINE=cli with RATE_LIMIT_MAX_REQUESTS=0 disables request throttling");
+    }
+    if cfg.runtime_engine == RuntimeEngine::Cli && cfg.open_access {
+        warn!(
+            "RUNTIME_ENGINE=cli with OPEN_ACCESS=true allows any sender to execute provider CLIs"
+        );
+    }
+    if cfg.runtime_engine == RuntimeEngine::Cli
+        && cfg.public_chat
+        && cfg.channel_allowlist.is_empty()
+    {
+        warn!("PUBLIC_CHAT=true allows non-operator AI access in every joined channel");
+    }
+    if cfg.store_full_payloads {
+        warn!("STORE_FULL_PAYLOADS=true stores inbound/outbound message text in SQLite");
+    }
 }
 
 #[cfg(test)]

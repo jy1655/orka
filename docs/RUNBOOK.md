@@ -26,8 +26,12 @@ cp .env.example .env
 - `DEFAULT_PROVIDER=claude|codex|opencode`
 - `DEFAULT_RUNTIME_MODE=session|event`
 - `STORE_FULL_PAYLOADS=false` 권장
+- `RUNTIME_ENGINE=cli`에서는 `RATE_LIMIT_MAX_REQUESTS=5` 이상 권장
+- 외부 health/metrics 노출 시 `HEALTH_BEARER_TOKEN` 설정
 - 운영 권한
   - 권장: `OPEN_ACCESS=false`, `ALLOWLIST=discord:<user_id>,telegram:<user_id>`
+  - 공개 채널 AI 호출은 `CHANNEL_ALLOWLIST=discord:<channel_id>,telegram:<chat_id>`로 제한
+  - `PUBLIC_CHAT=false` 유지
   - DM을 쓸 사용자는 반드시 `ALLOWLIST`에 포함
 
 주의:
@@ -50,9 +54,24 @@ CLI 호출 안전성:
 
 ## 3. 기동 절차
 
+### macOS/Linux 개발 실행
+
 ```bash
 cargo run -p orka-app -- doctor
 cargo run -p orka-app
+```
+
+### Windows 라이브 서비스 운영
+
+Windows 미니 PC에서 라이브 운영 중이면 `cargo run`/`pkill`/`nohup` 대신 NSSM 서비스 명령을 사용한다.
+
+```powershell
+nssm status OrkGateway
+nssm stop OrkGateway
+nssm start OrkGateway
+nssm restart OrkGateway
+Get-Content C:\Users\you\orka\logs\orka-stdout.log -Tail 100
+Get-Content C:\Users\you\orka\logs\orka-stderr.log -Tail 100
 ```
 
 참고:
@@ -61,6 +80,8 @@ cargo run -p orka-app
 - `orka-app`은 현재 디렉토리 또는 상위 디렉토리의 `.env`를 자동으로 로드한다.
 - Windows 미니 PC에서 PIN/password 입력 전 자동 복구가 필요하면 Startup 폴더가 아니라
   `scripts/windows/install-service.ps1`로 NSSM 서비스를 등록한다.
+- Windows 서비스 등록 시 `.env`를 NSSM 환경으로 import하지 않는 구성이 기본이다. 평문 `.env` 없이 서비스 계정 환경 변수나 credential loader를 사용한다.
+- Windows PowerShell 스크립트의 `.env` fallback 파서는 단순 `KEY=VALUE`만 지원한다. 따옴표, 줄바꿈, 복잡한 이스케이프가 필요한 값은 서비스 계정 환경 변수로 설정한다.
 
 정상 기동 로그 기준:
 
@@ -176,6 +197,8 @@ sqlite3 data/orka-gateway.db \
 
 실행 중 터미널에서 `Ctrl+C`.
 
+Windows NSSM 서비스는 `nssm stop OrkGateway`를 사용한다. 설치 스크립트는 console stop timeout을 15초로 맞춰 기본 `SHUTDOWN_DRAIN_TIMEOUT_MS=10000`보다 길게 둔다.
+
 정상 종료 로그 기준:
 - `shutdown signal received; ... draining inflight queue`
 - `inflight drain complete`
@@ -184,7 +207,11 @@ sqlite3 data/orka-gateway.db \
 ## 9. 운영 수칙
 
 - 운영 환경에서 `OPEN_ACCESS=true` 사용 금지
+- 운영 환경에서 `PUBLIC_CHAT=true` 사용 금지
+- 운영 환경에서 `RATE_LIMIT_MAX_REQUESTS=0` 사용 금지
+- `HEALTH_BIND`를 loopback 밖으로 열면 `HEALTH_BEARER_TOKEN`과 네트워크 allowlist를 함께 사용
 - DM 사용자는 `ALLOWLIST` 기준으로만 운영
+- 공개 채널 AI 호출은 `CHANNEL_ALLOWLIST` 기준으로만 운영
 - provider 전환/모드 전환 시각과 사유 기록
 - 장애 테스트는 소규모 채널에서 먼저 수행
 - 변경 후 최소 1회 smoke test(Discord/Telegram 중 사용 채널) 수행
@@ -199,9 +226,6 @@ sqlite3 data/orka-gateway.db \
 - `cargo test --workspace --locked`
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`
 - `cargo fmt --all -- --check`
-
-참고 게이트:
-
 - `cargo audit`
 
-현재 `cargo audit`는 참고용으로만 실행된다. `#8`의 `rand 0.8.5` upstream tracking warning이 남아 있기 때문에, 취약점 경고 정책이 정리되기 전까지는 PR 차단 게이트로 승격하지 않는다.
+`cargo audit`는 경고를 실패로 처리한다. `.cargo/audit.toml`에는 `serenity`의 upstream `tokio-tungstenite`/`rustls-webpki` 고정 의존성에서 들어오는 advisories만 명시적으로 ignore한다. ignore 항목은 GitHub 이슈에서 추적하고, 그 외 advisory는 CI 차단 대상이다.

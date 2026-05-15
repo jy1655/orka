@@ -17,7 +17,15 @@
 .PARAMETER ServiceName
     Windows service name used with -InstallService. Default: OrkGateway.
 .PARAMETER ProfileRoot
-    User profile root to expose to the service. Defaults to the current user profile.
+    User profile root to expose to the service when a provider CLI needs it.
+.PARAMETER ServiceAccount
+    Windows service account passed to install-service.ps1.
+.PARAMETER ServicePassword
+    Password for ServiceAccount when using a normal user account.
+.PARAMETER RunAsLocalSystem
+    Legacy service-account compatibility switch.
+.PARAMETER ImportEnvFile
+    Import .env values into NSSM service configuration. Avoid for live use.
 .PARAMETER DelayedAutoStart
     Use delayed automatic service start when -InstallService is supplied.
 #>
@@ -28,6 +36,10 @@ param(
     [switch]$InstallNssm,
     [string]$ServiceName = 'OrkGateway',
     [string]$ProfileRoot,
+    [string]$ServiceAccount,
+    [string]$ServicePassword,
+    [switch]$RunAsLocalSystem,
+    [switch]$ImportEnvFile,
     [switch]$DelayedAutoStart
 )
 
@@ -63,6 +75,38 @@ function Find-WindowsScript {
     return $null
 }
 
+function Assert-FileSha256 {
+    param(
+        [string]$Path,
+        [string]$ExpectedSha256,
+        [string]$Label
+    )
+
+    $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
+        Write-Error "$Label SHA256 mismatch. Expected $ExpectedSha256 but got $actual"
+        exit 1
+    }
+}
+
+function Assert-TrustedSignature {
+    param(
+        [string]$Path,
+        [string]$ExpectedSubjectContains,
+        [string]$Label
+    )
+
+    $signature = Get-AuthenticodeSignature -FilePath $Path
+    if ($signature.Status -ne 'Valid') {
+        Write-Error "$Label signature is not valid: $($signature.Status)"
+        exit 1
+    }
+    if ($ExpectedSubjectContains -and $signature.SignerCertificate.Subject -notlike "*$ExpectedSubjectContains*") {
+        Write-Error "$Label signer mismatch: $($signature.SignerCertificate.Subject)"
+        exit 1
+    }
+}
+
 Write-Host "=== Orka Windows Setup ===" -ForegroundColor Cyan
 Write-Host "  Install dir: $InstallDir"
 Write-Host ""
@@ -76,6 +120,7 @@ if (Test-Path "$env:SystemRoot\System32\vcruntime140.dll") {
     $vcPath = Join-Path $env:TEMP 'vc_redist.x64.exe'
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $vcUrl -OutFile $vcPath
+    Assert-TrustedSignature -Path $vcPath -ExpectedSubjectContains 'Microsoft' -Label 'Visual C++ Redistributable'
     Start-Process $vcPath -ArgumentList '/install', '/quiet', '/norestart' -Wait
     if (Test-Path "$env:SystemRoot\System32\vcruntime140.dll") {
         Write-Host "[OK] Visual C++ Runtime installed" -ForegroundColor Green
@@ -93,9 +138,12 @@ if (Test-Command 'pwsh') {
 } else {
     Write-Host "[INSTALLING] PowerShell 7..." -ForegroundColor Yellow
     $pwshUrl = 'https://github.com/PowerShell/PowerShell/releases/download/v7.5.1/PowerShell-7.5.1-win-x64.msi'
+    $pwshSha256 = 'b110eccaf55bb53ae5e6b6de478587ed8203570b0bda9bd374a0998e24d4033a'
     $pwshPath = Join-Path $env:TEMP 'pwsh-install.msi'
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $pwshUrl -OutFile $pwshPath
+    Assert-FileSha256 -Path $pwshPath -ExpectedSha256 $pwshSha256 -Label 'PowerShell 7 MSI'
+    Assert-TrustedSignature -Path $pwshPath -ExpectedSubjectContains 'Microsoft' -Label 'PowerShell 7 MSI'
     Start-Process msiexec.exe -ArgumentList '/i', $pwshPath, '/quiet', '/norestart' -Wait
     Refresh-Path
     if (Test-Command 'pwsh') {
@@ -114,9 +162,12 @@ if (Test-Command 'node') {
 } else {
     Write-Host "[INSTALLING] Node.js LTS..." -ForegroundColor Yellow
     $nodeUrl = 'https://nodejs.org/dist/v22.14.0/node-v22.14.0-x64.msi'
+    $nodeSha256 = '2c0cc97ec64c1e4111362e1e32e0547fd870e4d9c79ec844c117da583f21b386'
     $nodePath = Join-Path $env:TEMP 'node-install.msi'
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $nodeUrl -OutFile $nodePath
+    Assert-FileSha256 -Path $nodePath -ExpectedSha256 $nodeSha256 -Label 'Node.js MSI'
+    Assert-TrustedSignature -Path $nodePath -ExpectedSubjectContains 'OpenJS Foundation' -Label 'Node.js MSI'
     Start-Process msiexec.exe -ArgumentList '/i', $nodePath, '/quiet', '/norestart' -Wait
     Refresh-Path
     if (Test-Command 'node') {
@@ -203,16 +254,26 @@ if ($InstallService) {
         exit 1
     }
 
-    if (-not $ProfileRoot) {
-        $ProfileRoot = $env:USERPROFILE
-    }
-
     $serviceArgs = @{
         ServiceName = $ServiceName
         BinaryPath = $binaryPath
         WorkDir = $InstallDir
         EnvFile = $envFile
-        ProfileRoot = $ProfileRoot
+    }
+    if ($ProfileRoot) {
+        $serviceArgs['ProfileRoot'] = $ProfileRoot
+    }
+    if ($ServiceAccount) {
+        $serviceArgs['ServiceAccount'] = $ServiceAccount
+    }
+    if ($ServicePassword) {
+        $serviceArgs['ServicePassword'] = $ServicePassword
+    }
+    if ($RunAsLocalSystem) {
+        $serviceArgs['RunAsLocalSystem'] = $true
+    }
+    if ($ImportEnvFile) {
+        $serviceArgs['ImportEnvFile'] = $true
     }
     if ($InstallNssm) {
         $serviceArgs['InstallNssm'] = $true

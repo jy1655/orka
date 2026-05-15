@@ -14,6 +14,30 @@ use orka_core::model::{
 };
 use orka_core::ports::AgentRuntime;
 
+const PROVIDER_ENV_DENYLIST: &[&str] = &[
+    "DISCORD_BOT_TOKEN",
+    "TELEGRAM_BOT_TOKEN",
+    "HEALTH_BEARER_TOKEN",
+    "DATABASE_URL",
+    "ALLOWLIST",
+    "CHANNEL_ALLOWLIST",
+    "OPEN_ACCESS",
+    "PUBLIC_CHAT",
+    "STORE_FULL_PAYLOADS",
+    "RUNTIME_ENGINE",
+    "DEFAULT_PROVIDER",
+    "DEFAULT_RUNTIME_MODE",
+    "CLAUDE_BIN",
+    "CLAUDE_EVENT_ARGS",
+    "CLAUDE_SESSION_ARGS",
+    "CODEX_BIN",
+    "CODEX_EVENT_ARGS",
+    "CODEX_SESSION_ARGS",
+    "OPENCODE_BIN",
+    "OPENCODE_EVENT_ARGS",
+    "OPENCODE_SESSION_ARGS",
+];
+
 pub struct CliAgentRuntime {
     config: CliRuntimeConfig,
 }
@@ -167,6 +191,7 @@ impl CliAgentRuntime {
             .env("ORKA_CHAT_ID", &request.event.chat_id)
             .env("ORKA_USER_ID", &request.event.user_id)
             .env("ORKA_SCOPE_KEY", &request.scope_key);
+        scrub_provider_env(&mut command);
 
         let output = timeout(
             Duration::from_millis(self.config.timeout_ms),
@@ -277,6 +302,12 @@ impl AgentRuntime for CliAgentRuntime {
             text: parsed.text,
             session_id,
         })
+    }
+}
+
+fn scrub_provider_env(command: &mut Command) {
+    for key in PROVIDER_ENV_DENYLIST {
+        command.env_remove(key);
     }
 }
 
@@ -456,12 +487,19 @@ fn sanitize_for_log(raw: &str) -> String {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::OnceLock;
 
     use anyhow::Result;
     use chrono::Utc;
+    use tokio::sync::Mutex;
 
     use super::*;
     use orka_core::model::{Channel, InboundEvent};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn echo_config() -> CliRuntimeConfig {
         let echo = ProviderCommandConfig {
@@ -553,6 +591,49 @@ mod tests {
             .await
             .expect_err("missing provider binary should fail");
         assert!(err.to_string().contains("failed to spawn"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_runtime_scrubs_gateway_secrets_from_provider_environment() -> Result<()> {
+        let _guard = env_lock().lock().await;
+        std::env::set_var("DISCORD_BOT_TOKEN", "discord-secret");
+        std::env::set_var("TELEGRAM_BOT_TOKEN", "telegram-secret");
+        std::env::set_var("HEALTH_BEARER_TOKEN", "health-secret");
+        std::env::set_var("DATABASE_URL", "sqlite://secret.db");
+
+        let script = write_executable_script(
+            "env-scrub",
+            r#"printf 'discord=%s\ntelegram=%s\nhealth=%s\ndb=%s\nprovider=%s\nmode=%s\n' "${DISCORD_BOT_TOKEN:-}" "${TELEGRAM_BOT_TOKEN:-}" "${HEALTH_BEARER_TOKEN:-}" "${DATABASE_URL:-}" "${ORKA_PROVIDER:-}" "${ORKA_MODE:-}""#,
+        )?;
+        let mut config = echo_config();
+        config.codex.bin = script.display().to_string();
+        config.codex.event_args = vec!["noop".to_string()];
+        let runtime = CliAgentRuntime::new(config)?;
+
+        let result = runtime
+            .invoke(request(ProviderKind::Codex, RuntimeMode::Event))
+            .await;
+
+        std::env::remove_var("DISCORD_BOT_TOKEN");
+        std::env::remove_var("TELEGRAM_BOT_TOKEN");
+        std::env::remove_var("HEALTH_BEARER_TOKEN");
+        std::env::remove_var("DATABASE_URL");
+        let _ = fs::remove_file(script);
+
+        let response = result?;
+        let text = response.text.expect("provider output");
+        assert!(text.contains("discord="));
+        assert!(text.contains("telegram="));
+        assert!(text.contains("health="));
+        assert!(text.contains("db="));
+        assert!(!text.contains("discord-secret"));
+        assert!(!text.contains("telegram-secret"));
+        assert!(!text.contains("health-secret"));
+        assert!(!text.contains("secret.db"));
+        assert!(text.contains("provider=codex"));
+        assert!(text.contains("mode=event"));
         Ok(())
     }
 

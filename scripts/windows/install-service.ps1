@@ -16,9 +16,21 @@
 .PARAMETER EnvFile
     Path to .env file. Variables are loaded into the service environment.
 .PARAMETER ProfileRoot
-    User profile root to expose to the service when running under LocalSystem
-    (for example C:\Users\you). When omitted, the script infers it from the
-    deployment path if possible.
+    User profile root to expose to the service when a provider CLI needs an
+    interactive user's profile (for example C:\Users\you). Prefer a dedicated
+    low-privilege service account for live use.
+.PARAMETER ServiceAccount
+    Windows service account. Defaults to NT SERVICE\<ServiceName>. Use a
+    dedicated low-privilege user for provider CLIs that need a user profile.
+.PARAMETER ServicePassword
+    Password for ServiceAccount when using a normal user account.
+.PARAMETER RunAsLocalSystem
+    Legacy compatibility switch. Avoid for live use because provider CLIs will
+    run with machine-level privileges.
+.PARAMETER ImportEnvFile
+    Import .env values into NSSM AppEnvironmentExtra. This writes secrets to
+    the service registry config in plaintext; prefer machine/user environment
+    variables or a credential loader for live use.
 .PARAMETER RestartDelayMs
     Delay before NSSM restarts the app after an unexpected exit. Default: 5000.
 .PARAMETER InstallNssm
@@ -36,6 +48,10 @@ param(
     [string]$WorkDir,
     [string]$EnvFile,
     [string]$ProfileRoot,
+    [string]$ServiceAccount,
+    [string]$ServicePassword,
+    [switch]$RunAsLocalSystem,
+    [switch]$ImportEnvFile,
     [int]$RestartDelayMs = 5000,
     [switch]$InstallNssm,
     [string]$NssmInstallDir = (Join-Path $env:ProgramData 'nssm'),
@@ -73,12 +89,14 @@ function Install-Nssm {
 
     $version = '2.24'
     $zipUrl = "https://nssm.cc/release/nssm-$version.zip"
+    $zipSha256 = '727d1e42275c605e0f04aba98095c38a8e1e46def453cdffce42869428aa6743'
     $zipPath = Join-Path $env:TEMP "nssm-$version.zip"
     $extractDir = Join-Path $env:TEMP "nssm-install-$([Guid]::NewGuid().ToString('N'))"
 
     Write-Host "NSSM not found. Installing NSSM $version..." -ForegroundColor Yellow
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     Invoke-WebRequest -Uri $zipUrl -OutFile $zipPath -UseBasicParsing
+    Assert-FileSha256 -Path $zipPath -ExpectedSha256 $zipSha256 -Label "NSSM $version"
 
     if (Test-Path $extractDir) {
         Remove-Item $extractDir -Recurse -Force
@@ -103,6 +121,41 @@ function Install-Nssm {
     Add-ToMachinePath $DestinationDir
     Write-Host "NSSM installed: $installedExe" -ForegroundColor Green
     return $installedExe
+}
+
+function Assert-FileSha256 {
+    param(
+        [string]$Path,
+        [string]$ExpectedSha256,
+        [string]$Label
+    )
+
+    $actual = (Get-FileHash -Path $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $ExpectedSha256.ToLowerInvariant()) {
+        Write-Error "$Label SHA256 mismatch. Expected $ExpectedSha256 but got $actual"
+        exit 1
+    }
+}
+
+function Protect-PathForServiceAccount {
+    param(
+        [string]$Path,
+        [string]$Account,
+        [switch]$Recursive
+    )
+
+    if (-not $Path -or -not (Test-Path $Path) -or -not $Account) {
+        return
+    }
+
+    $aclAccount = if ($Account -ieq 'LocalSystem') { 'NT AUTHORITY\SYSTEM' } else { $Account }
+    if ($Recursive) {
+        $grant = "$($aclAccount):(OI)(CI)M"
+        & icacls $Path /grant $grant /T | Out-Null
+    } else {
+        $grant = "$($aclAccount):M"
+        & icacls $Path /grant $grant | Out-Null
+    }
 }
 
 function Test-NssmExecutable {
@@ -196,7 +249,12 @@ if (-not $WorkDir) {
 if (-not $EnvFile) {
     $EnvFile = Join-Path $ProjectRoot '.env'
 }
-if (-not $ProfileRoot) {
+if ($RunAsLocalSystem) {
+    $ServiceAccount = 'LocalSystem'
+} elseif (-not $ServiceAccount) {
+    $ServiceAccount = "NT SERVICE\$ServiceName"
+}
+if (-not $ProfileRoot -and $RunAsLocalSystem) {
     $ProfileRoot = Get-InferredProfileRoot $WorkDir
     if (-not $ProfileRoot) {
         $ProfileRoot = Get-InferredProfileRoot $BinaryPath
@@ -212,6 +270,7 @@ Write-Host "Installing service '$ServiceName'..." -ForegroundColor Green
 Write-Host "  Binary : $BinaryPath"
 Write-Host "  WorkDir: $WorkDir"
 Write-Host "  EnvFile: $EnvFile"
+Write-Host "  Account: $ServiceAccount"
 if ($ProfileRoot) {
     Write-Host "  Profile: $ProfileRoot"
 }
@@ -239,9 +298,15 @@ if ($DelayedAutoStart) {
 } else {
     & $NssmExe set $ServiceName Start SERVICE_AUTO_START
 }
-& $NssmExe set $ServiceName ObjectName LocalSystem
+if ($ServicePassword) {
+    & $NssmExe set $ServiceName ObjectName $ServiceAccount $ServicePassword
+} else {
+    & $NssmExe set $ServiceName ObjectName $ServiceAccount
+}
 & $NssmExe set $ServiceName AppExit Default Restart
 & $NssmExe set $ServiceName AppRestartDelay $RestartDelayMs
+& $NssmExe set $ServiceName AppStopMethodSkip 6
+& $NssmExe set $ServiceName AppStopMethodConsole 15000
 
 # Stdout/stderr logging
 $LogDir = Join-Path $WorkDir 'logs'
@@ -255,9 +320,12 @@ if (-not (Test-Path $LogDir)) {
 & $NssmExe set $ServiceName AppRotateFiles 1
 & $NssmExe set $ServiceName AppRotateBytes 10485760  # 10 MB
 
-# Load .env into service environment
+# Load the service environment. By default, disable application-level .env
+# autoloading so live services can source secrets from Windows service/user
+# environment or a dedicated credential loader instead of plaintext files.
 $envMap = [ordered]@{}
-if (Test-Path $EnvFile) {
+if ($ImportEnvFile -and (Test-Path $EnvFile)) {
+    Write-Warning "ImportEnvFile writes .env values to NSSM service configuration in plaintext. Use only for trusted local setups."
     Get-Content $EnvFile | ForEach-Object {
         $line = $_.Trim()
         if ($line -and -not $line.StartsWith('#') -and $line -match '^([^=]+)=(.*)$') {
@@ -267,9 +335,9 @@ if (Test-Path $EnvFile) {
 }
 
 if ($ProfileRoot -and (Test-Path $ProfileRoot)) {
-    # LocalSystem does not have the interactive user's Codex/npm profile by
-    # default. Point the service at the deployment user's profile so CLI auth
-    # and config resolve the same way they do in an interactive shell.
+    # Some provider CLIs keep auth/config under a user profile. Prefer running
+    # the service as that low-privilege user; LocalSystem should be an explicit
+    # legacy compatibility choice.
     $envMap['USERPROFILE'] = $ProfileRoot
     $envMap['HOME'] = $ProfileRoot
 
@@ -284,10 +352,27 @@ if ($ProfileRoot -and (Test-Path $ProfileRoot)) {
     }
 }
 
+if (-not $ImportEnvFile) {
+    $envMap['ORKA_DISABLE_DOTENV'] = 'true'
+}
+if (-not $envMap.Contains('RUST_LOG')) {
+    $envMap['RUST_LOG'] = 'info'
+}
+
 if ($envMap.Count -gt 0) {
     $envVars = @($envMap.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" })
     & $NssmExe set $ServiceName AppEnvironmentExtra @envVars
     Write-Host "  Loaded $($envVars.Count) environment variables into the service" -ForegroundColor Cyan
+}
+
+Protect-PathForServiceAccount -Path $WorkDir -Account $ServiceAccount -Recursive
+Protect-PathForServiceAccount -Path $LogDir -Account $ServiceAccount -Recursive
+$DataDir = Join-Path $WorkDir 'data'
+if (Test-Path $DataDir) {
+    Protect-PathForServiceAccount -Path $DataDir -Account $ServiceAccount -Recursive
+}
+if ($ImportEnvFile -and (Test-Path $EnvFile)) {
+    Protect-PathForServiceAccount -Path $EnvFile -Account $ServiceAccount
 }
 
 Write-Host ""

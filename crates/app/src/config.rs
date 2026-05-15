@@ -58,8 +58,11 @@ pub struct AppConfig {
     pub telegram_bot_token: String,
     pub database_url: String,
     pub health_bind: String,
+    pub health_bearer_token: String,
     pub allowlist: Vec<String>,
     pub open_access: bool,
+    pub public_chat: bool,
+    pub channel_allowlist: Vec<String>,
     pub default_provider: ProviderKind,
     pub default_runtime_mode: RuntimeMode,
     pub session_fail_fallback_event: bool,
@@ -80,6 +83,7 @@ impl AppConfig {
         let database_url = env::var("DATABASE_URL")
             .unwrap_or_else(|_| "sqlite://data/orka-gateway.db".to_string());
         let health_bind = env::var("HEALTH_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+        let health_bearer_token = env::var("HEALTH_BEARER_TOKEN").unwrap_or_default();
         let allowlist = env::var("ALLOWLIST")
             .unwrap_or_default()
             .split(',')
@@ -88,6 +92,14 @@ impl AppConfig {
             .map(ToOwned::to_owned)
             .collect();
         let open_access = parse_bool_env("OPEN_ACCESS");
+        let public_chat = parse_bool_env("PUBLIC_CHAT");
+        let channel_allowlist = env::var("CHANNEL_ALLOWLIST")
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
         let default_provider = parse_provider_env("DEFAULT_PROVIDER", ProviderKind::Claude);
         let default_runtime_mode =
             parse_runtime_mode_env("DEFAULT_RUNTIME_MODE", RuntimeMode::Session);
@@ -104,7 +116,7 @@ impl AppConfig {
 
         let max_concurrent_tasks = parse_usize_env("MAX_CONCURRENT_TASKS", 8);
         let rate_limit_window_secs = parse_u64_env("RATE_LIMIT_WINDOW_SECS", 60);
-        let rate_limit_max_requests = parse_usize_env("RATE_LIMIT_MAX_REQUESTS", 0);
+        let rate_limit_max_requests = parse_nonnegative_usize_env("RATE_LIMIT_MAX_REQUESTS", 5);
         let discord_use_embeds = parse_bool_env("DISCORD_USE_EMBEDS");
         let store_full_payloads = parse_bool_env("STORE_FULL_PAYLOADS");
 
@@ -113,8 +125,11 @@ impl AppConfig {
             telegram_bot_token,
             database_url,
             health_bind,
+            health_bearer_token,
             allowlist,
             open_access,
+            public_chat,
+            channel_allowlist,
             default_provider,
             default_runtime_mode,
             session_fail_fallback_event,
@@ -140,7 +155,11 @@ impl AppConfig {
             format!("provider_timeout_ms={}", self.cli_runtime.timeout_ms),
             format!("max_output_bytes={}", self.cli_runtime.max_output_bytes),
             format!("health_bind={}", self.health_bind),
-            format!("database_url={}", self.database_url),
+            format!(
+                "health_bearer_token={}",
+                configured_label(&self.health_bearer_token)
+            ),
+            format!("database_url={}", database_url_label(&self.database_url)),
             format!(
                 "discord_bot_token={}",
                 configured_label(&self.discord_bot_token)
@@ -150,7 +169,9 @@ impl AppConfig {
                 configured_label(&self.telegram_bot_token)
             ),
             format!("open_access={}", self.open_access),
+            format!("public_chat={}", self.public_chat),
             format!("allowlist_entries={}", self.allowlist.len()),
+            format!("channel_allowlist_entries={}", self.channel_allowlist.len()),
             format!("store_full_payloads={}", self.store_full_payloads),
             format!(
                 "claude_bin={}",
@@ -203,7 +224,11 @@ fn configured_bin(value: &str) -> String {
     if trimmed.is_empty() {
         "auto".to_string()
     } else {
-        trimmed.to_string()
+        let normalized = trimmed.replace('\\', "/");
+        match normalized.rsplit('/').next() {
+            Some(file_name) if !file_name.is_empty() => format!("configured:{file_name}"),
+            _ => "configured".to_string(),
+        }
     }
 }
 
@@ -211,7 +236,17 @@ fn format_args(args: &[String]) -> String {
     if args.is_empty() {
         "(built-in defaults)".to_string()
     } else {
-        args.join(" ")
+        format!("configured ({} arg(s))", args.len())
+    }
+}
+
+fn database_url_label(value: &str) -> String {
+    if value.trim().starts_with("sqlite://") {
+        "sqlite".to_string()
+    } else if value.trim().is_empty() {
+        "missing".to_string()
+    } else {
+        "configured".to_string()
     }
 }
 
@@ -319,6 +354,29 @@ fn parse_usize_env(name: &str, default: usize) -> usize {
     }
 }
 
+fn parse_nonnegative_usize_env(name: &str, default: usize) -> usize {
+    match env::var(name) {
+        Ok(value) => match parse_nonnegative_usize(&value) {
+            Some(parsed) => parsed,
+            None => {
+                if !value.trim().is_empty() {
+                    warn!(
+                        env = name,
+                        value = %value,
+                        "invalid non-negative integer; using default"
+                    );
+                }
+                default
+            }
+        },
+        Err(_) => default,
+    }
+}
+
+fn parse_nonnegative_usize(raw: &str) -> Option<usize> {
+    raw.trim().parse::<usize>().ok()
+}
+
 fn parse_args_env(name: &str) -> Vec<String> {
     parse_args(&env::var(name).unwrap_or_default())
 }
@@ -384,8 +442,8 @@ fn parse_args(raw: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_args, parse_bool, parse_positive_u64, parse_positive_usize, parse_provider_kind,
-        parse_runtime_engine, parse_runtime_mode, AppConfig, CliRuntimeConfig,
+        parse_args, parse_bool, parse_nonnegative_usize, parse_positive_u64, parse_positive_usize,
+        parse_provider_kind, parse_runtime_engine, parse_runtime_mode, AppConfig, CliRuntimeConfig,
         ProviderCommandConfig, RuntimeEngine,
     };
     use orka_core::model::{ProviderKind, RuntimeMode};
@@ -427,6 +485,13 @@ mod tests {
     }
 
     #[test]
+    fn rate_limit_parser_accepts_explicit_zero_disable() {
+        assert_eq!(parse_nonnegative_usize("0"), Some(0));
+        assert_eq!(parse_nonnegative_usize("5"), Some(5));
+        assert_eq!(parse_nonnegative_usize("-1"), None);
+    }
+
+    #[test]
     fn parse_args_supports_json_and_whitespace() {
         assert_eq!(
             parse_args(r#"["exec","--json","--skip-git-repo-check"]"#),
@@ -453,8 +518,11 @@ mod tests {
             telegram_bot_token: String::new(),
             database_url: "sqlite://data/orka-gateway.db".to_string(),
             health_bind: "127.0.0.1:8787".to_string(),
+            health_bearer_token: String::new(),
             allowlist: vec!["discord:1".to_string()],
             open_access: false,
+            public_chat: false,
+            channel_allowlist: vec!["discord:channel-1".to_string()],
             default_provider: ProviderKind::Codex,
             default_runtime_mode: RuntimeMode::Session,
             session_fail_fallback_event: false,
@@ -491,7 +559,13 @@ mod tests {
         assert!(report.contains("default_provider=codex"));
         assert!(report.contains("discord_bot_token=configured"));
         assert!(report.contains("telegram_bot_token=missing"));
-        assert!(report.contains("codex_bin=/usr/local/bin/codex"));
+        assert!(report.contains("public_chat=false"));
+        assert!(report.contains("channel_allowlist_entries=1"));
+        assert!(report.contains("database_url=sqlite"));
+        assert!(report.contains("codex_bin=configured:codex"));
+        assert!(report.contains("codex_event_args=configured (2 arg(s))"));
         assert!(!report.contains("secret-discord-token"));
+        assert!(!report.contains("/usr/local/bin/codex"));
+        assert!(!report.contains("exec --json"));
     }
 }

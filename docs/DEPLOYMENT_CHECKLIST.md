@@ -17,9 +17,15 @@
 - 운영 권한 정책
   - `OPEN_ACCESS=false`
   - `ALLOWLIST` 설정 완료
+  - `PUBLIC_CHAT=false`
+  - 필요한 공개 채널만 `CHANNEL_ALLOWLIST`에 등록
   - DM 사용 계정이 `ALLOWLIST`에 포함됐는지 확인
+- 비용/남용 방지
+  - `RUNTIME_ENGINE=cli`이면 `RATE_LIMIT_MAX_REQUESTS`가 0이 아닌지 확인
 - 저장 정책
   - `STORE_FULL_PAYLOADS=false` 권장
+- Health/Metrics 정책
+  - `HEALTH_BIND`가 loopback 밖이면 `HEALTH_BEARER_TOKEN`과 네트워크 allowlist 설정
 - 런타임 정책
   - `RUNTIME_ENGINE=cli` 또는 `echo`
   - `DEFAULT_PROVIDER`
@@ -35,6 +41,8 @@ command -v opencode
 
 Codex shim 오류가 있으면 `CODEX_BIN` 네이티브 경로를 사용한다.
 Windows 무인 운영이면 `register-startup.ps1`가 아니라 `install-service.ps1` 서비스 등록을 사용한다. Startup 폴더 등록은 사용자 로그인 전 복구를 보장하지 않는다.
+Windows 라이브 서비스에서는 `.env`를 NSSM 환경으로 import하지 말고, 서비스 계정 환경 변수나 credential loader를 사용한다.
+PowerShell fallback `.env` 파서는 단순 `KEY=VALUE`만 지원하므로 따옴표/줄바꿈/복잡한 이스케이프가 필요한 값은 `.env`에 두지 않는다.
 
 4. 로컬 검증
 
@@ -53,15 +61,34 @@ cp data/orka-gateway.db backups/orka-$(date +%Y%m%d-%H%M%S).db
 
 1. 기존 프로세스 종료
 
+macOS/Linux 개발 실행:
+
 ```bash
 pkill -f orka-app || true
 ```
 
+Windows 라이브 서비스:
+
+```powershell
+nssm stop OrkGateway
+```
+
 2. 앱 기동
+
+macOS/Linux 개발 실행:
 
 ```bash
 cargo run -p orka-app -- doctor
 cargo run -p orka-app
+```
+
+Windows 라이브 서비스:
+
+```powershell
+C:\Users\you\orka\orka-app.exe doctor
+nssm start OrkGateway
+nssm status OrkGateway
+Get-Content C:\Users\you\orka\logs\orka-stdout.log -Tail 100
 ```
 
 3. 기동 로그 확인
@@ -170,4 +197,4 @@ cargo run -p orka-app
 
 - 운영 시간대 변경은 소규모 단계 배포 우선
 - 배포 직후 10~15분 집중 모니터링
-- 권한 변경(`ALLOWLIST`, `OPEN_ACCESS`)은 별도 변경으로 분리
+- 권한 변경(`ALLOWLIST`, `OPEN_ACCESS`, `CHANNEL_ALLOWLIST`, `PUBLIC_CHAT`)은 별도 변경으로 분리
