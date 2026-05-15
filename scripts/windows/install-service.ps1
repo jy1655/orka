@@ -203,12 +203,18 @@ function Assert-NssmObjectName {
         [string]$Expected
     )
 
-    $actual = & $NssmExe get $ServiceName ObjectName
-    if ($actual -is [array]) {
-        $actual = $actual -join "`n"
+    # NSSM writes ObjectName into the SCM registry, which the Service Control
+    # Manager itself reads. Reading from the registry avoids `nssm get`'s
+    # UTF-16 console encoding (each ASCII char interleaved with a NUL byte
+    # under some locales) which would never byte-match an ASCII expected.
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    try {
+        $actual = (Get-ItemProperty -Path $key -Name ObjectName -ErrorAction Stop).ObjectName
+    } catch {
+        throw "NSSM ObjectName verification failed for '$ServiceName': could not read $key\ObjectName. $($_.Exception.Message)"
     }
 
-    if ($actual -cne $Expected) {
+    if ($actual -ne $Expected) {
         throw "NSSM ObjectName verification failed for '$ServiceName'. Expected '$Expected' but got '$actual'."
     }
 }
