@@ -137,25 +137,85 @@ function Assert-FileSha256 {
     }
 }
 
-function Protect-PathForServiceAccount {
+function Get-ServiceAclPrincipal {
+    param(
+        [string]$Account
+    )
+
+    if ($Account -ieq 'LocalSystem') {
+        return 'NT AUTHORITY\SYSTEM'
+    }
+
+    return $Account
+}
+
+function Invoke-Icacls {
     param(
         [string]$Path,
-        [string]$Account,
+        [string[]]$Arguments
+    )
+
+    $icaclsArgs = @($Path) + $Arguments
+    & icacls @icaclsArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "icacls failed for path: $Path"
+    }
+}
+
+function Grant-ServiceReadExecute {
+    param(
+        [string]$Path,
+        [string]$Principal,
         [switch]$Recursive
     )
 
-    if (-not $Path -or -not (Test-Path $Path) -or -not $Account) {
+    if (-not $Path -or -not (Test-Path $Path) -or -not $Principal) {
         return
     }
 
-    $aclAccount = if ($Account -ieq 'LocalSystem') { 'NT AUTHORITY\SYSTEM' } else { $Account }
     if ($Recursive) {
-        $grant = "$($aclAccount):(OI)(CI)M"
-        & icacls $Path /grant $grant /T | Out-Null
+        Invoke-Icacls -Path $Path -Arguments @('/grant:r', "${Principal}:(OI)(CI)RX", '/T')
     } else {
-        $grant = "$($aclAccount):M"
-        & icacls $Path /grant $grant | Out-Null
+        Invoke-Icacls -Path $Path -Arguments @('/grant:r', "${Principal}:RX")
     }
+}
+
+function Protect-EnvFileAcl {
+    param(
+        [string]$Path,
+        [string]$Principal
+    )
+
+    if (-not $Path -or -not (Test-Path $Path)) {
+        Write-Warning ".env file not found in install directory; skipping .env ACL hardening: $Path"
+        return
+    }
+
+    Write-Host "  Locking .env ACL for service principal: $Principal" -ForegroundColor Cyan
+    Invoke-Icacls -Path $Path -Arguments @('/reset')
+    Invoke-Icacls -Path $Path -Arguments @('/inheritance:r')
+    Invoke-Icacls -Path $Path -Arguments @('/remove:g', '*S-1-5-32-545', '*S-1-5-11', '*S-1-1-0')
+    Invoke-Icacls -Path $Path -Arguments @('/grant:r', "${Principal}:R")
+}
+
+function Protect-ServiceDirectoryAcl {
+    param(
+        [string]$Path,
+        [string]$Principal
+    )
+
+    if (-not $Path) {
+        return
+    }
+    if (-not (Test-Path $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
+
+    Write-Host "  Locking directory ACL for service principal: $Path" -ForegroundColor Cyan
+    Invoke-Icacls -Path $Path -Arguments @('/reset', '/T')
+    Invoke-Icacls -Path $Path -Arguments @('/inheritance:r', '/T')
+    Invoke-Icacls -Path $Path -Arguments @('/remove:g', '*S-1-5-32-545', '*S-1-5-11', '*S-1-1-0', '/T')
+    Invoke-Icacls -Path $Path -Arguments @('/grant:r', "${Principal}:(OI)(CI)M", '*S-1-5-32-544:(OI)(CI)M', '/T')
 }
 
 function Test-NssmExecutable {
@@ -365,15 +425,13 @@ if ($envMap.Count -gt 0) {
     Write-Host "  Loaded $($envVars.Count) environment variables into the service" -ForegroundColor Cyan
 }
 
-Protect-PathForServiceAccount -Path $WorkDir -Account $ServiceAccount -Recursive
-Protect-PathForServiceAccount -Path $LogDir -Account $ServiceAccount -Recursive
+$ServiceAclPrincipal = Get-ServiceAclPrincipal -Account $ServiceAccount
+Grant-ServiceReadExecute -Path $WorkDir -Principal $ServiceAclPrincipal -Recursive
+Protect-ServiceDirectoryAcl -Path $LogDir -Principal $ServiceAclPrincipal
 $DataDir = Join-Path $WorkDir 'data'
-if (Test-Path $DataDir) {
-    Protect-PathForServiceAccount -Path $DataDir -Account $ServiceAccount -Recursive
-}
-if ($ImportEnvFile -and (Test-Path $EnvFile)) {
-    Protect-PathForServiceAccount -Path $EnvFile -Account $ServiceAccount
-}
+Protect-ServiceDirectoryAcl -Path $DataDir -Principal $ServiceAclPrincipal
+$InstallEnvFile = Join-Path $WorkDir '.env'
+Protect-EnvFileAcl -Path $InstallEnvFile -Principal $ServiceAclPrincipal
 
 Write-Host ""
 Write-Host "Service installed. Commands:" -ForegroundColor Green
