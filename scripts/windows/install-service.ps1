@@ -20,8 +20,9 @@
     interactive user's profile (for example C:\Users\you). Prefer a dedicated
     low-privilege service account for live use.
 .PARAMETER ServiceAccount
-    Windows service account. Defaults to NT SERVICE\<ServiceName>. Use a
-    dedicated low-privilege user for provider CLIs that need a user profile.
+    Windows service account. Defaults to LocalSystem for compatibility. Use
+    NT SERVICE\<ServiceName> for a virtual account, or a dedicated
+    low-privilege user for provider CLIs that need a user profile.
 .PARAMETER ServicePassword
     Password for ServiceAccount when using a normal user account.
 .PARAMETER RunAsLocalSystem
@@ -48,8 +49,8 @@ param(
     [string]$WorkDir,
     [string]$EnvFile,
     [string]$ProfileRoot,
-    [string]$ServiceAccount,
-    [string]$ServicePassword,
+    [string]$ServiceAccount = 'LocalSystem',
+    [SecureString]$ServicePassword = $null,
     [switch]$RunAsLocalSystem,
     [switch]$ImportEnvFile,
     [int]$RestartDelayMs = 5000,
@@ -147,6 +148,69 @@ function Get-ServiceAclPrincipal {
     }
 
     return $Account
+}
+
+function Test-LocalSystemServiceAccount {
+    param([string]$Account)
+
+    return $Account -ieq 'LocalSystem'
+}
+
+function Test-NtServiceAccount {
+    param([string]$Account)
+
+    return $Account -like 'NT SERVICE\*'
+}
+
+function Set-NssmObjectName {
+    param(
+        [string]$NssmExe,
+        [string]$ServiceName,
+        [string]$Account,
+        [SecureString]$Password,
+        [switch]$RequirePassword,
+        [switch]$UseEmptyPassword
+    )
+
+    if ($RequirePassword) {
+        $passwordBstr = [IntPtr]::Zero
+        $plainPassword = $null
+        try {
+            $passwordBstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Password)
+            $plainPassword = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($passwordBstr)
+            & $NssmExe set $ServiceName ObjectName $Account $plainPassword
+        } finally {
+            if ($passwordBstr -ne [IntPtr]::Zero) {
+                [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordBstr)
+            }
+            $plainPassword = $null
+        }
+
+        return
+    }
+
+    if ($UseEmptyPassword) {
+        & $NssmExe set $ServiceName ObjectName $Account ''
+    } else {
+        & $NssmExe set $ServiceName ObjectName $Account
+    }
+}
+
+function Assert-NssmObjectName {
+    param(
+        [string]$NssmExe,
+        [string]$ServiceName,
+        [string]$Expected
+    )
+
+    $actual = & $NssmExe get $ServiceName ObjectName
+    if ($actual -is [array]) {
+        $actual = $actual -join "`n"
+    }
+
+    if ($actual -cne $Expected) {
+        throw "NSSM ObjectName verification failed for '$ServiceName'. Expected '$Expected' but got '$actual'."
+    }
 }
 
 function Invoke-Icacls {
@@ -311,10 +375,21 @@ if (-not $EnvFile) {
 }
 if ($RunAsLocalSystem) {
     $ServiceAccount = 'LocalSystem'
-} elseif (-not $ServiceAccount) {
-    $ServiceAccount = "NT SERVICE\$ServiceName"
 }
-if (-not $ProfileRoot -and $RunAsLocalSystem) {
+if ([string]::IsNullOrWhiteSpace($ServiceAccount)) {
+    $ServiceAccount = 'LocalSystem'
+}
+
+$IsLocalSystemServiceAccount = Test-LocalSystemServiceAccount -Account $ServiceAccount
+$IsNtServiceAccount = Test-NtServiceAccount -Account $ServiceAccount
+$RequiresServicePassword = -not $IsLocalSystemServiceAccount -and -not $IsNtServiceAccount
+$UseEmptyServicePassword = -not $IsLocalSystemServiceAccount -and $IsNtServiceAccount
+
+if ($RequiresServicePassword -and -not $ServicePassword) {
+    throw "ServicePassword required for non-LocalSystem, non-NT-SERVICE accounts"
+}
+
+if (-not $ProfileRoot -and $IsLocalSystemServiceAccount) {
     $ProfileRoot = Get-InferredProfileRoot $WorkDir
     if (-not $ProfileRoot) {
         $ProfileRoot = Get-InferredProfileRoot $BinaryPath
@@ -358,11 +433,14 @@ if ($DelayedAutoStart) {
 } else {
     & $NssmExe set $ServiceName Start SERVICE_AUTO_START
 }
-if ($ServicePassword) {
-    & $NssmExe set $ServiceName ObjectName $ServiceAccount $ServicePassword
-} else {
-    & $NssmExe set $ServiceName ObjectName $ServiceAccount
-}
+Set-NssmObjectName `
+    -NssmExe $NssmExe `
+    -ServiceName $ServiceName `
+    -Account $ServiceAccount `
+    -Password $ServicePassword `
+    -RequirePassword:$RequiresServicePassword `
+    -UseEmptyPassword:$UseEmptyServicePassword
+Assert-NssmObjectName -NssmExe $NssmExe -ServiceName $ServiceName -Expected $ServiceAccount
 & $NssmExe set $ServiceName AppExit Default Restart
 & $NssmExe set $ServiceName AppRestartDelay $RestartDelayMs
 & $NssmExe set $ServiceName AppStopMethodSkip 6

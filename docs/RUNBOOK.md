@@ -91,6 +91,72 @@ Get-Content C:\Users\you\orka\logs\orka-stderr.log -Tail 100
 - Discord 사용 시: `discord adapter ready as ...`
 - Telegram 사용 시: `telegram adapter started (polling mode)`
 
+## Service Account Hardening (H-1)
+
+`scripts/windows/install-service.ps1` still defaults to `LocalSystem` for compatibility. This keeps existing WinMini installs from changing service identity on a re-run. Treat that default as a transition setting only: production should move to either a virtual service account or a dedicated low-privilege local user after the operator has confirmed provider CLI auth and filesystem ACLs.
+
+Choose the account mode by operational need:
+
+- `LocalSystem`: compatibility mode for existing installs. It is not recommended for production because the gateway and provider CLIs run with machine-level privileges.
+- `NT SERVICE\OrkGateway` or another `NT SERVICE\*` virtual account: simplest hardened mode. Windows manages the identity, no password is needed, and the installer grants `.env`, `data/`, and `logs/` ACLs to that service principal.
+- Dedicated local user such as `.\orka-svc`: best when AI CLI providers need user-profile credentials. This lets `codex`, `claude`, and similar CLIs inherit a daunf-style auth profile from the service user's `%USERPROFILE%`, which stops 401s caused by running under an identity with no CLI auth.
+
+Install examples:
+
+```powershell
+# Compatibility mode: LocalSystem remains the default; the flag is explicit here.
+.\scripts\windows\install-service.ps1 `
+  -BinaryPath C:\Users\you\orka\orka-app.exe `
+  -ServiceAccount 'LocalSystem' `
+  -InstallNssm `
+  -DelayedAutoStart
+```
+
+```powershell
+# Virtual service account.
+.\scripts\windows\install-service.ps1 `
+  -BinaryPath C:\Users\you\orka\orka-app.exe `
+  -ServiceAccount 'NT SERVICE\OrkGateway' `
+  -InstallNssm `
+  -DelayedAutoStart
+```
+
+```powershell
+# Dedicated local user. Create the user separately, log in as that user, and
+# complete provider CLI auth before installing the service with this identity.
+$servicePassword = Read-Host 'Password for .\orka-svc' -AsSecureString
+.\scripts\windows\install-service.ps1 `
+  -BinaryPath C:\Users\you\orka\orka-app.exe `
+  -ServiceAccount '.\orka-svc' `
+  -ServicePassword $servicePassword `
+  -ProfileRoot C:\Users\orka-svc `
+  -InstallNssm `
+  -DelayedAutoStart
+```
+
+Migration procedure for an existing installation:
+
+```powershell
+nssm stop OrkGateway
+
+# Re-run one of the install-service.ps1 examples above with the chosen account.
+
+nssm get OrkGateway ObjectName
+icacls C:\Users\you\orka\.env
+icacls C:\Users\you\orka\data
+icacls C:\Users\you\orka\logs
+
+nssm start OrkGateway
+```
+
+Expected ACL principals:
+
+- `LocalSystem`: `.env` grants `NT AUTHORITY\SYSTEM:R`; `data/` and `logs/` grant `NT AUTHORITY\SYSTEM:(OI)(CI)M`.
+- Virtual account: `.env` grants `NT SERVICE\OrkGateway:R`; `data/` and `logs/` grant `NT SERVICE\OrkGateway:(OI)(CI)M`.
+- Dedicated local user: `.env`, `data/`, and `logs/` grant the same local user account passed to `-ServiceAccount`.
+
+Limitation: AI CLI providers such as `codex` and `claude` keep auth tokens under `%USERPROFILE%`. To let the service inherit those credentials, run it as a dedicated user account that has been logged in and CLI-authenticated. Virtual service accounts will NOT inherit a human's CLI auth.
+
 ## 4. 헬스 확인
 
 ```bash
@@ -219,7 +285,7 @@ Windows NSSM 서비스는 `nssm stop OrkGateway`를 사용한다. 설치 스크�
 
 3. 수동 교체 후 `.env` ACL 재적용
 
-기본 서비스명은 `OrkGateway`이다. 다른 이름(예: `OrkaGateway`)으로 등록한 환경은 service principal과 restart 명령의 이름을 맞춘다.
+기본 서비스명은 `OrkGateway`이다. 다른 이름(예: `OrkaGateway`)으로 등록한 환경은 service principal과 restart 명령의 이름을 맞춘다. 아래 예시는 `NT SERVICE\OrkGateway` virtual service account 기준이다. 현재 설치된 계정은 `nssm get OrkGateway ObjectName`으로 확인하고, principal 매핑은 `Service Account Hardening (H-1)` 섹션을 따른다.
 
 ```powershell
 $envPath = 'C:\Users\you\orka\.env'
@@ -230,7 +296,7 @@ icacls $envPath /grant:r 'NT SERVICE\OrkGateway:R'
 icacls $envPath
 ```
 
-`LocalSystem` 서비스로 등록한 예외 환경은 마지막 grant principal을 `NT AUTHORITY\SYSTEM:R`로 바꾼다.
+`LocalSystem` 서비스로 등록한 환경은 마지막 grant principal을 `NT AUTHORITY\SYSTEM:R`로 바꾼다. 전용 local user로 등록한 환경은 `-ServiceAccount`에 전달한 계정명으로 바꾼다.
 
 4. Windows 서비스 재시작
 
