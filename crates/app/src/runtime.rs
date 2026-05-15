@@ -537,6 +537,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn cli_runtime_falls_back_to_plain_text_output() -> Result<()> {
         let runtime = CliAgentRuntime::new(echo_config())?;
