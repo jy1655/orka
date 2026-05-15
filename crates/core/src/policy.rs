@@ -74,10 +74,10 @@ impl AccessPolicy {
         &self,
         channel: Channel,
         chat_id: &str,
-        user_id: &str,
-        claims: &[String],
+        _user_id: &str,
+        _claims: &[String],
     ) -> bool {
-        if self.is_operator(channel, user_id, claims) || self.public_chat {
+        if self.public_chat {
             return true;
         }
 
@@ -141,7 +141,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_access_defaults_to_operator_or_allowlisted_channel() {
+    fn runtime_access_defaults_to_allowlisted_channel_only() {
         let policy = AccessPolicy::with_runtime_access(
             vec!["discord:admin".to_string()],
             false,
@@ -149,9 +149,39 @@ mod tests {
             vec!["discord:channel-1".to_string()],
         );
 
-        assert!(policy.can_invoke_runtime(Channel::Discord, "other-channel", "admin", &[]));
+        assert!(!policy.can_invoke_runtime(Channel::Discord, "other-channel", "admin", &[]));
         assert!(policy.can_invoke_runtime(Channel::Discord, "channel-1", "user-1", &[]));
         assert!(!policy.can_invoke_runtime(Channel::Discord, "other-channel", "user-1", &[]));
+    }
+
+    #[test]
+    fn operators_do_not_bypass_public_channel_allowlist() {
+        let policy = AccessPolicy::with_runtime_access(
+            vec!["discord:admin".to_string()],
+            false,
+            false,
+            Vec::<String>::new(),
+        );
+
+        assert!(!policy.can_invoke_runtime(Channel::Discord, "channel-1", "admin", &[]));
+    }
+
+    #[test]
+    fn runtime_channel_allowlist_matches_discord_and_telegram_scopes() {
+        let policy = AccessPolicy::with_runtime_access(
+            Vec::<String>::new(),
+            false,
+            false,
+            vec![
+                "discord:123456789012345678".to_string(),
+                "telegram:-1001234567890".to_string(),
+            ],
+        );
+
+        assert!(policy.can_invoke_runtime(Channel::Discord, "123456789012345678", "user-1", &[]));
+        assert!(policy.can_invoke_runtime(Channel::Telegram, "-1001234567890", "user-1", &[]));
+        assert!(!policy.can_invoke_runtime(Channel::Discord, "999", "user-1", &[]));
+        assert!(!policy.can_invoke_runtime(Channel::Telegram, "-100999", "user-1", &[]));
     }
 
     #[test]
