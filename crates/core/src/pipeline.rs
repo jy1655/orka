@@ -141,21 +141,15 @@ impl GatewayPipeline {
             return Ok(());
         }
 
-        if !self.policy.can_invoke_runtime(
-            event.channel,
-            &event.chat_id,
-            &event.user_id,
-            &event.claims,
-        ) {
-            self.dispatch(
-                event.reply(
-                    "AI access is restricted to allowlisted operators or approved channels."
-                        .to_string(),
-                ),
-                None,
-                Some(&scope_key),
+        if !event.is_direct_message
+            && !self.policy.can_invoke_runtime(
+                event.channel,
+                &event.chat_id,
+                &event.user_id,
+                &event.claims,
             )
-            .await?;
+        {
+            self.audit_channel_blocked(&event, &scope_key).await?;
             return Ok(());
         }
 
@@ -552,6 +546,24 @@ impl GatewayPipeline {
         Ok(false)
     }
 
+    async fn audit_channel_blocked(&self, event: &InboundEvent, scope_key: &str) -> Result<()> {
+        info!(
+            reason = "channel_blocked",
+            channel = event.channel.as_str(),
+            chat_id = %event.chat_id,
+            user_id = %event.user_id,
+            scope_key = %scope_key,
+            "runtime invocation blocked by channel policy"
+        );
+        self.store
+            .save_outbound(
+                &event.reply("channel_blocked".to_string()),
+                None,
+                Some(scope_key),
+            )
+            .await
+    }
+
     async fn current_runtime_preference(&self, scope_key: &str) -> Result<RuntimePreference> {
         Ok(self
             .store
@@ -926,6 +938,10 @@ mod tests {
         event_with_text(idempotency_key, "user-1", "hello")
     }
 
+    fn public_chat_policy() -> AccessPolicy {
+        AccessPolicy::with_runtime_access(Vec::<String>::new(), false, true, Vec::<String>::new())
+    }
+
     #[tokio::test]
     async fn event_mode_does_not_store_provider_session() -> Result<()> {
         let store = Arc::new(MemoryStore::default());
@@ -935,7 +951,7 @@ mod tests {
             store.clone(),
             runtime.clone(),
             outbound,
-            AccessPolicy::new(Vec::<String>::new(), true),
+            public_chat_policy(),
             RuntimePreference {
                 provider: ProviderKind::Codex,
                 mode: RuntimeMode::Event,
@@ -972,7 +988,7 @@ mod tests {
             store.clone(),
             runtime.clone(),
             outbound,
-            AccessPolicy::new(Vec::<String>::new(), true),
+            public_chat_policy(),
             RuntimePreference {
                 provider: ProviderKind::Claude,
                 mode: RuntimeMode::Session,
@@ -1011,7 +1027,7 @@ mod tests {
             store,
             runtime.clone(),
             outbound,
-            AccessPolicy::new(Vec::<String>::new(), true),
+            public_chat_policy(),
             RuntimePreference {
                 provider: ProviderKind::Claude,
                 mode: RuntimeMode::Session,
@@ -1154,7 +1170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn public_runtime_messages_require_operator_or_channel_approval() -> Result<()> {
+    async fn allowlisted_public_runtime_message_invokes_runtime() -> Result<()> {
         let store = Arc::new(MemoryStore::default());
         let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
         let outbound = Arc::new(CollectingOutbound::default());
@@ -1162,7 +1178,12 @@ mod tests {
             store,
             runtime.clone(),
             outbound.clone(),
-            AccessPolicy::new(vec!["discord:admin-1".to_string()], false),
+            AccessPolicy::with_runtime_access(
+                Vec::<String>::new(),
+                false,
+                false,
+                vec!["discord:chat-1".to_string()],
+            ),
             RuntimePreference {
                 provider: ProviderKind::Claude,
                 mode: RuntimeMode::Event,
@@ -1175,13 +1196,45 @@ mod tests {
             .handle_event(event_with_text("evt-denied", "user-1", "hello"))
             .await?;
 
-        assert!(runtime.last_request.lock().await.is_none());
+        assert!(runtime.last_request.lock().await.is_some());
         let actions = outbound.actions.lock().await;
         assert_eq!(actions.len(), 1);
-        assert_eq!(
-            actions[0].text,
-            "AI access is restricted to allowlisted operators or approved channels.".to_string()
+        assert_eq!(actions[0].text, "ok".to_string());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocked_public_runtime_message_is_audited_without_reply() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store.clone(),
+            runtime.clone(),
+            outbound.clone(),
+            AccessPolicy::with_runtime_access(
+                Vec::<String>::new(),
+                false,
+                false,
+                Vec::<String>::new(),
+            ),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Event,
+            },
+            false,
+            String::new(),
         );
+
+        pipeline
+            .handle_event(event_with_text("evt-channel-blocked", "user-1", "hello"))
+            .await?;
+
+        assert!(runtime.last_request.lock().await.is_none());
+        assert!(outbound.actions.lock().await.is_empty());
+        let audit_entries = store.outbound.lock().await;
+        assert_eq!(audit_entries.len(), 1);
+        assert_eq!(audit_entries[0].text, "channel_blocked");
         Ok(())
     }
 
@@ -1307,6 +1360,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn direct_message_operator_runtime_is_not_blocked_by_channel_allowlist() -> Result<()> {
+        let store = Arc::new(MemoryStore::default());
+        let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
+        let outbound = Arc::new(CollectingOutbound::default());
+        let pipeline = GatewayPipeline::new(
+            store,
+            runtime.clone(),
+            outbound.clone(),
+            AccessPolicy::with_runtime_access(
+                vec!["discord:admin-1".to_string()],
+                false,
+                false,
+                Vec::<String>::new(),
+            ),
+            RuntimePreference {
+                provider: ProviderKind::Claude,
+                mode: RuntimeMode::Event,
+            },
+            false,
+            String::new(),
+        );
+
+        pipeline
+            .handle_event(direct_message_event(
+                "dm-operator",
+                "admin-1",
+                "hello from dm",
+            ))
+            .await?;
+
+        assert!(runtime.last_request.lock().await.is_some());
+        let actions = outbound.actions.lock().await;
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].text, "ok".to_string());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn direct_messages_require_allowlisted_operator() -> Result<()> {
         let store = Arc::new(MemoryStore::default());
         let runtime = Arc::new(CaptureRuntime::new(Some("generated-session")));
@@ -1346,7 +1437,7 @@ mod tests {
             store.clone(),
             runtime.clone(),
             outbound.clone(),
-            AccessPolicy::new(Vec::<String>::new(), true),
+            public_chat_policy(),
             RuntimePreference {
                 provider: ProviderKind::Claude,
                 mode: RuntimeMode::Session,
@@ -1383,7 +1474,7 @@ mod tests {
             store,
             runtime,
             outbound.clone(),
-            AccessPolicy::new(Vec::<String>::new(), true),
+            public_chat_policy(),
             RuntimePreference {
                 provider: ProviderKind::Codex,
                 mode: RuntimeMode::Event,
@@ -1413,7 +1504,7 @@ mod tests {
             store.clone(),
             runtime,
             outbound.clone(),
-            AccessPolicy::new(Vec::<String>::new(), true),
+            public_chat_policy(),
             RuntimePreference {
                 provider: ProviderKind::Claude,
                 mode: RuntimeMode::Session,

@@ -120,6 +120,8 @@ impl AppConfig {
         let discord_use_embeds = parse_bool_env("DISCORD_USE_EMBEDS");
         let store_full_payloads = parse_bool_env("STORE_FULL_PAYLOADS");
 
+        warn_dangerous_public_cli(public_chat, rate_limit_max_requests, runtime_engine);
+
         Self {
             discord_bot_token,
             telegram_bot_token,
@@ -377,6 +379,18 @@ fn parse_nonnegative_usize(raw: &str) -> Option<usize> {
     raw.trim().parse::<usize>().ok()
 }
 
+fn warn_dangerous_public_cli(
+    public_chat: bool,
+    rate_limit_max_requests: usize,
+    runtime_engine: RuntimeEngine,
+) {
+    if public_chat && rate_limit_max_requests == 0 && runtime_engine == RuntimeEngine::Cli {
+        warn!(
+            "PUBLIC_CHAT=true with RATE_LIMIT_MAX_REQUESTS=0 and RUNTIME_ENGINE=cli allows unthrottled public CLI access"
+        );
+    }
+}
+
 fn parse_args_env(name: &str) -> Vec<String> {
     parse_args(&env::var(name).unwrap_or_default())
 }
@@ -441,12 +455,73 @@ fn parse_args(raw: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        env,
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
     use super::{
         parse_args, parse_bool, parse_nonnegative_usize, parse_positive_u64, parse_positive_usize,
         parse_provider_kind, parse_runtime_engine, parse_runtime_mode, AppConfig, CliRuntimeConfig,
         ProviderCommandConfig, RuntimeEngine,
     };
     use orka_core::model::{ProviderKind, RuntimeMode};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        values: Vec<(&'static str, Option<String>)>,
+    }
+
+    impl EnvGuard {
+        fn set(vars: &[(&'static str, &'static str)]) -> Self {
+            let values = vars
+                .iter()
+                .map(|(key, _)| (*key, env::var(key).ok()))
+                .collect();
+            for (key, value) in vars {
+                env::set_var(key, value);
+            }
+            Self { values }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.values {
+                match value {
+                    Some(value) => env::set_var(key, value),
+                    None => env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedLog(Arc<Mutex<Vec<u8>>>);
+
+    struct SharedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl<'a> MakeWriter<'a> for SharedLog {
+        type Writer = SharedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedLogWriter(self.0.clone())
+        }
+    }
+
+    impl Write for SharedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("log lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn parse_bool_accepts_common_truthy_values() {
@@ -509,6 +584,30 @@ mod tests {
                 "--skip-git-repo-check".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn from_env_warns_for_public_chat_cli_without_rate_limit() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        let _env = EnvGuard::set(&[
+            ("PUBLIC_CHAT", "true"),
+            ("RATE_LIMIT_MAX_REQUESTS", "0"),
+            ("RUNTIME_ENGINE", "cli"),
+        ]);
+        let logs = SharedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_ansi(false)
+            .with_target(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, AppConfig::from_env);
+
+        let output = String::from_utf8(logs.0.lock().expect("log lock").clone())
+            .expect("tracing output is utf8");
+        assert!(output
+            .contains("PUBLIC_CHAT=true with RATE_LIMIT_MAX_REQUESTS=0 and RUNTIME_ENGINE=cli"));
     }
 
     #[test]
