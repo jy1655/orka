@@ -33,6 +33,9 @@
   - `RUNTIME_ENGINE=cli` 또는 `echo`
   - `DEFAULT_PROVIDER`
   - `DEFAULT_RUNTIME_MODE`
+- Windows service account hardening
+  - [ ] Service account is not LocalSystem in production (verify with sc.exe qc OrkGateway | findstr SERVICE_START_NAME)
+  - [ ] For AI CLI access (codex/claude/opencode): service runs as the user that holds the CLI auth tokens
 
 3. 바이너리/CLI 확인 (`RUNTIME_ENGINE=cli`)
 
