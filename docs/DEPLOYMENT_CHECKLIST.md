@@ -14,6 +14,9 @@
 - `.env`에 운영 토큰 설정
   - `DISCORD_BOT_TOKEN`
   - `TELEGRAM_BOT_TOKEN` (사용 시)
+- C-1 bot token 보안
+  - .env ACL locked to service SID only (verify with icacls .env)
+  - Bot tokens rotated within last 90 days; rotation procedure in RUNBOOK Bot Token Rotation section
 - 운영 권한 정책
   - `OPEN_ACCESS=false`
   - `ALLOWLIST` 설정 완료

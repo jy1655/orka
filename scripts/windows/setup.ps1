@@ -58,6 +58,53 @@ function Refresh-Path {
                 [System.Environment]::GetEnvironmentVariable('Path', 'User')
 }
 
+function Get-ServiceAclPrincipal {
+    param(
+        [string]$Account,
+        [switch]$RunAsLocalSystem,
+        [string]$Name
+    )
+
+    if ($RunAsLocalSystem -or $Account -ieq 'LocalSystem') {
+        return 'NT AUTHORITY\SYSTEM'
+    }
+    if ($Account) {
+        return $Account
+    }
+
+    return "NT SERVICE\$Name"
+}
+
+function Invoke-Icacls {
+    param(
+        [string]$Path,
+        [string[]]$Arguments
+    )
+
+    $icaclsArgs = @($Path) + $Arguments
+    & icacls @icaclsArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "icacls failed for path: $Path"
+    }
+}
+
+function Protect-EnvFileAcl {
+    param(
+        [string]$Path,
+        [string]$Principal
+    )
+
+    if (-not $Path -or -not (Test-Path $Path)) {
+        return
+    }
+
+    Write-Host "[OK] Locking .env ACL for service principal: $Principal" -ForegroundColor Green
+    Invoke-Icacls -Path $Path -Arguments @('/reset')
+    Invoke-Icacls -Path $Path -Arguments @('/inheritance:r')
+    Invoke-Icacls -Path $Path -Arguments @('/remove:g', '*S-1-5-32-545', '*S-1-5-11', '*S-1-1-0')
+    Invoke-Icacls -Path $Path -Arguments @('/grant:r', "${Principal}:R")
+}
+
 function Find-WindowsScript {
     param([string]$Name)
 
@@ -235,6 +282,8 @@ if (Test-Path $envFile) {
 } elseif (Test-Path $envExample) {
     Copy-Item $envExample $envFile
     Write-Host "[CREATED] .env copied from .env.example" -ForegroundColor Yellow
+    $serviceAclPrincipal = Get-ServiceAclPrincipal -Account $ServiceAccount -RunAsLocalSystem:$RunAsLocalSystem -Name $ServiceName
+    Protect-EnvFileAcl -Path $envFile -Principal $serviceAclPrincipal
 } else {
     Write-Host "[WARN] No .env file. Copy .env.example and edit it." -ForegroundColor Yellow
 }
