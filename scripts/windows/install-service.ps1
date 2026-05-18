@@ -228,7 +228,16 @@ function Invoke-Icacls {
     $icaclsArgs = @($Path) + $Arguments
     & icacls @icaclsArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "icacls failed for path: $Path"
+        # icacls returns a non-zero exit code when some — but not necessarily
+        # all — entries in a recursive walk failed. The typical cause on a
+        # running gateway host is an in-use log file (NSSM keeps a handle on
+        # orka-stdout.log / orka-stderr.log for a short window after stop).
+        # The rest of the tree did receive the ACL change. Warn loudly so the
+        # operator can rerun on a fully quiesced host later, but do not throw
+        # — a single locked log file should not roll back an entire installer
+        # run, especially when the throw would skip later ACL grants and
+        # leave the host in a worse half-applied state than continuing.
+        Write-Warning "icacls returned exit code $LASTEXITCODE for path: $Path (some entries in the tree may have been skipped; see icacls output above)"
     }
 }
 
